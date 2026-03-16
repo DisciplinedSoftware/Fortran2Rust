@@ -311,17 +311,44 @@ def _get_failing_files(error: str, c_dir: Path) -> list[Path]:
 
 
 def _compile_c(c_dir: Path) -> tuple[bool, str]:
-    # Exclude bench_*.c — each has its own main() and is compiled separately
+    """Compile C sources individually without linking.
+
+    This isolates syntax/type issues in each file and avoids link-time noise from
+    unresolved external symbols in unrelated translation units.
+    """
     c_files = sorted(f for f in c_dir.glob("*.c") if not f.name.startswith("bench_"))
     if not c_files:
         return False, "No .c files found"
-    result = subprocess.run(
-        ["gcc", "-O2", f"-I{c_dir}", "-o", "/dev/null"]
-        + [str(f) for f in c_files]
-        + ["-lm", "-lf2c"],
-        capture_output=True, text=True, timeout=120,
-    )
-    return result.returncode == 0, result.stdout + result.stderr
+
+    all_ok = True
+    chunks: list[str] = []
+    for c_file in c_files:
+        cmd = ["gcc", "-O2", f"-I{c_dir}", "-c", str(c_file), "-o", "/dev/null"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        chunks.append(
+            f"=== COMPILE {c_file.name} ===\n"
+            f"COMMAND: {' '.join(cmd)}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}\n"
+            f"EXIT: {result.returncode}\n"
+        )
+        if result.returncode != 0:
+            all_ok = False
+
+    return all_ok, "\n".join(chunks)
+
+
+def _is_non_repairable_bench_error(error: str) -> bool:
+    """Return True for benchmark failures that LLM source edits cannot fix."""
+    text = (error or "").lower()
+    markers = [
+        "undefined reference to",
+        "collect2: error",
+        "ld returned 1 exit status",
+        "cannot find -l",
+        "cannot find /",
+    ]
+    return any(marker in text for marker in markers)
 
 
 def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset_dir: Path) -> tuple[bool, str, Path | None, float | None]:
@@ -381,6 +408,11 @@ _C_CODE_LINE_RE = re.compile(
     r"logical|ftnlen)\b)"
 )
 
+_FORTRAN_UNIT_RE = re.compile(
+    r"^\s*(?:[a-z][a-z0-9_()*,\s]*\s+)?(function|subroutine|program)\s+([a-z][a-z0-9_]*)\b",
+    flags=re.IGNORECASE,
+)
+
 
 def _looks_like_c_code(content: str) -> bool:
     return bool(
@@ -390,6 +422,100 @@ def _looks_like_c_code(content: str) -> bool:
             flags=re.MULTILINE,
         )
     )
+
+
+def _has_balanced_c_braces(content: str) -> bool:
+    depth = 0
+    in_single = False
+    in_double = False
+    escape = False
+    in_line_comment = False
+    in_block_comment = False
+    prev = ""
+
+    for ch in content:
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            prev = ch
+            continue
+        if in_block_comment:
+            if prev == "*" and ch == "/":
+                in_block_comment = False
+            prev = ch
+            continue
+        if in_single:
+            if not escape and ch == "'":
+                in_single = False
+            escape = (ch == "\\" and not escape)
+            prev = ch
+            continue
+        if in_double:
+            if not escape and ch == '"':
+                in_double = False
+            escape = (ch == "\\" and not escape)
+            prev = ch
+            continue
+
+        if prev == "/" and ch == "/":
+            in_line_comment = True
+            prev = ch
+            continue
+        if prev == "/" and ch == "*":
+            in_block_comment = True
+            prev = ch
+            continue
+        if ch == "'":
+            in_single = True
+            escape = False
+            prev = ch
+            continue
+        if ch == '"':
+            in_double = True
+            escape = False
+            prev = ch
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+
+        prev = ch
+
+    return depth == 0 and not in_single and not in_double and not in_block_comment
+
+
+def _is_plausibly_complete_c_rewrite(original: str, candidate: str) -> bool:
+    """Guardrail for full-file rewrites to avoid accepting truncated LLM output."""
+    if not candidate.strip():
+        return False
+    if not _has_balanced_c_braces(candidate):
+        return False
+
+    original_lines = [ln for ln in original.splitlines() if ln.strip()]
+    candidate_lines = [ln for ln in candidate.splitlines() if ln.strip()]
+    if not original_lines:
+        return True
+
+    # For medium/large files, require near-complete size retention.
+    large_file = len(original) > 20_000 or len(original_lines) > 500
+    if large_file:
+        if len(candidate) < int(len(original) * 0.90):
+            return False
+        if len(candidate_lines) < int(len(original_lines) * 0.90):
+            return False
+
+    # Keep a light tail-anchor check so dropped suffixes are rejected.
+    tail = "\n".join(original_lines[-8:]).strip()
+    if tail and len(tail) > 20 and tail not in candidate:
+        # Permit tail variation on small files where a full rewrite is plausible.
+        if large_file:
+            return False
+
+    return True
 
 
 def _extract_c_from_llm_response(response: str) -> str:
@@ -416,6 +542,132 @@ def _extract_c_from_llm_response(response: str) -> str:
 
     candidate = re.sub(r"\n?```\s*$", "", candidate.strip())
     return candidate.strip()
+
+
+def _normalize_f2c_include_order(content: str) -> str:
+    """Ensure #include "f2c.h" appears after system includes.
+
+    f2c.h defines macros like abs/min/max that can conflict with declarations in
+    headers such as stdlib.h if f2c.h is included first.
+    """
+    lines = content.splitlines()
+    first_include = next((i for i, line in enumerate(lines) if line.strip().startswith("#include")), None)
+    if first_include is None:
+        return content.strip()
+
+    end = first_include
+    while end < len(lines):
+        stripped = lines[end].strip()
+        if not stripped or stripped.startswith("#include"):
+            end += 1
+            continue
+        break
+
+    block = lines[first_include:end]
+    f2c_includes = [line for line in block if "f2c.h" in line]
+    if not f2c_includes:
+        return content.strip()
+
+    others = [line for line in block if "f2c.h" not in line]
+    reordered = others + f2c_includes
+    if reordered == block:
+        return content.strip()
+
+    lines[first_include:end] = reordered
+    return "\n".join(lines).strip()
+
+
+def _fortran_defined_units(path: Path) -> set[str]:
+    """Extract defined Fortran unit names from a source file."""
+    units: set[str] = set()
+    try:
+        for raw in path.read_text(errors="replace").splitlines():
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("*", "!")):
+                continue
+            match = _FORTRAN_UNIT_RE.match(stripped)
+            if not match:
+                continue
+            units.add(match.group(2).upper())
+    except Exception:
+        return set()
+    return units
+
+
+def _extract_required_fortran_units(path: Path, required_syms: set[str]) -> str:
+    """Extract only required Fortran units from a source file.
+
+    This keeps Stage 4 LLM conversion prompts/output small for monolithic files
+    that contain large PROGRAM bodies plus many routines.
+    """
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except Exception:
+        return path.read_text(errors="replace")
+
+    units: list[tuple[int, int, str, str]] = []
+    starts: list[tuple[int, str, str]] = []  # (line_idx, kind, name)
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("*", "!")):
+            continue
+        match = _FORTRAN_UNIT_RE.match(stripped)
+        if not match:
+            continue
+        kind = match.group(1).lower()
+        name = match.group(2).upper()
+        starts.append((i, kind, name))
+
+    if not starts:
+        return "\n".join(lines)
+
+    for idx, (start, kind, name) in enumerate(starts):
+        end = starts[idx + 1][0] if idx + 1 < len(starts) else len(lines)
+        units.append((start, end, kind, name))
+
+    # Keep any required symbol unit; if none match, keep non-program units as a fallback.
+    keep: list[tuple[int, int, str, str]] = [u for u in units if u[3] in required_syms]
+    if not keep:
+        keep = [u for u in units if u[2] != "program"]
+    if not keep:
+        keep = units
+
+    header_end = units[0][0]
+    out_lines: list[str] = []
+    if header_end > 0:
+        out_lines.extend(lines[:header_end])
+        out_lines.append("")
+
+    for start, end, _, _ in keep:
+        out_lines.extend(lines[start:end])
+        out_lines.append("")
+
+    return "\n".join(out_lines).strip() + "\n"
+
+
+def _required_symbols(entry_points: list[str] | None, call_graph: dict | None) -> set[str]:
+    """Compute a conservative required-symbol set from entry points and call graph."""
+    required = {ep.upper() for ep in (entry_points or [])}
+    graph = {str(k).upper(): [str(c).upper() for c in (v or [])] for k, v in (call_graph or {}).items()}
+    queue = list(required)
+    while queue:
+        sym = queue.pop(0)
+        for callee in graph.get(sym, []):
+            if callee not in required:
+                required.add(callee)
+                queue.append(callee)
+    return required
+
+
+def _normalize_f2c_includes_in_dir(c_dir: Path) -> None:
+    """Normalize include ordering in all C files in a directory."""
+    for c_file in sorted(c_dir.glob("*.c")):
+        original = c_file.read_text(errors="replace")
+        normalized = _normalize_f2c_include_order(original)
+        if normalized != original.strip():
+            c_file.write_text(normalized + "\n")
 
 
 def _compact_c_for_llm(code: str) -> tuple[str, str]:
@@ -476,8 +728,11 @@ def _restore_c_after_llm(content: str, preserved_banner: str) -> str:
     return f"{preserved_banner}\n\n{restored}".strip()
 
 
-def _repair_file(llm: "LLMClient", failing_file: Path, error: str, attempt: int = 0) -> None:
-    """Ask LLM to fix one specific file and write it back."""
+def _repair_file(llm: "LLMClient", failing_file: Path, error: str, attempt: int = 0) -> bool:
+    """Ask LLM to fix one specific file and write it back.
+
+    Returns True when file content changed, False otherwise.
+    """
     original = failing_file.read_text()
     compact_code, preserved_banner = _compact_c_for_llm(original)
     response = llm.repair(
@@ -495,10 +750,21 @@ def _repair_file(llm: "LLMClient", failing_file: Path, error: str, attempt: int 
         content = original
     else:
         content = _restore_c_after_llm(content, preserved_banner)
-    failing_file.write_text(content.strip() + "\n")
+        content = _normalize_f2c_include_order(content)
+        if not _is_plausibly_complete_c_rewrite(original, content):
+            content = original
+    final_content = content.strip() + "\n"
+    changed = final_content != original
+    failing_file.write_text(final_content)
+    return changed
 
 
-def _generate_c_from_fortran(llm: "LLMClient", f_file: Path, output_dir: Path) -> Path:
+def _generate_c_from_fortran(
+    llm: "LLMClient",
+    f_file: Path,
+    output_dir: Path,
+    fortran_source: str | None = None,
+) -> Path:
     """Ask the LLM to convert a Fortran file that f2c could not handle into f2c-compatible C."""
     c_path = output_dir / f_file.with_suffix(".c").name
     response = llm.repair(
@@ -512,11 +778,14 @@ def _generate_c_from_fortran(llm: "LLMClient", f_file: Path, output_dir: Path) -
             "Return ONLY the complete C file, no explanation, no markdown fences."
         ),
         error="f2c could not convert this file (likely uses Fortran 90+ features like LEN_TRIM).",
-        code=f_file.read_text(),
+        code=fortran_source if fortran_source is not None else f_file.read_text(),
     )
     content = _extract_c_from_llm_response(response)
     if not _looks_like_c_code(content):
         raise CompilationError("C", "LLM conversion did not return recognizable C code")
+    if not _has_balanced_c_braces(content):
+        raise CompilationError("C", "LLM conversion appears truncated (unbalanced braces)")
+    content = _normalize_f2c_include_order(content)
     c_path.write_text(content.strip() + "\n")
     return c_path
 
@@ -540,16 +809,33 @@ def fix_c_code(
     for f in c_dir.glob("*.h"):
         shutil.copy(f, output_dir / f.name)
 
+    _normalize_f2c_includes_in_dir(output_dir)
+
     llm_log: list[dict] = []
     llm_turns = 0
     total_retries = 0
     gcc_compile_log = output_dir / "gcc_compile.log"
 
     # ── Pre-step: LLM-convert any .f files that f2c could not handle ─────────
-    f_files_to_convert = [
+    required_syms = _required_symbols(entry_points, call_graph)
+    f_candidates = [
         f_file for f_file in sorted(c_dir.glob("*.f"))
         if not (output_dir / f_file.with_suffix(".c").name).exists()
     ]
+    skipped_irrelevant_units: list[Path] = []
+    f_files_to_convert: list[Path] = []
+    for f_file in f_candidates:
+        defined = _fortran_defined_units(f_file)
+        if required_syms and defined and required_syms.isdisjoint(defined):
+            skipped_irrelevant_units.append(f_file)
+            continue
+        f_files_to_convert.append(f_file)
+
+    if skipped_irrelevant_units:
+        log.info(
+            "Skipping LLM conversion for .f file(s) that define no required symbols: "
+            + ", ".join(p.name for p in skipped_irrelevant_units)
+        )
     if f_files_to_convert:
         if status_fn:
             status_fn(f"LLM: converting {len(f_files_to_convert)} Fortran file(s) to C (parallel)…")
@@ -558,7 +844,8 @@ def fix_c_code(
             log.info(f"LLM converting {f_file.name} to C (f2c could not handle it)")
             dest_f = output_dir / f_file.name
             shutil.copy(f_file, dest_f)
-            _generate_c_from_fortran(llm, dest_f, output_dir)
+            selected_source = _extract_required_fortran_units(dest_f, required_syms)
+            _generate_c_from_fortran(llm, dest_f, output_dir, fortran_source=selected_source)
 
         with ThreadPoolExecutor(max_workers=len(f_files_to_convert)) as executor:
             list(executor.map(_convert_one, f_files_to_convert))
@@ -577,6 +864,7 @@ def fix_c_code(
         log.warning(compile_output)
 
     attempt = 0
+    no_progress_rounds = 0
     while not compile_ok and attempt < max_retries:
         failing_files = _get_failing_files(compile_output, output_dir)
         _console.print(
@@ -586,7 +874,7 @@ def fix_c_code(
         )
 
         # Fix all currently-failing files in parallel, then recompile once.
-        def _fix_one(target: Path) -> None:
+        def _fix_one(target: Path) -> bool:
             llm_log.append({
                 "phase": "compile", "attempt": attempt,
                 "target_file": target.name,
@@ -595,10 +883,20 @@ def fix_c_code(
             if status_fn:
                 status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
             log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
-            _repair_file(llm, target, filter_errors_for_file(compile_output, target.name), attempt=attempt)
+            return _repair_file(llm, target, filter_errors_for_file(compile_output, target.name), attempt=attempt)
 
         with ThreadPoolExecutor(max_workers=len(failing_files)) as executor:
-            list(executor.map(_fix_one, failing_files))
+            changed_flags = list(executor.map(_fix_one, failing_files))
+
+        if not any(changed_flags):
+            no_progress_rounds += 1
+            log.warning(
+                "No effective source changes after LLM repair round %d for file(s): %s",
+                attempt + 1,
+                ", ".join(f.name for f in failing_files),
+            )
+        else:
+            no_progress_rounds = 0
 
         llm_turns += len(failing_files)
         total_retries += len(failing_files)
@@ -614,6 +912,15 @@ def fix_c_code(
             log.info(f"C compile OK after attempt {attempt+1}")
         else:
             log.warning(f"C compile still failing after attempt {attempt+1}")
+
+        # Cost guard: stop early when repeated LLM rounds produce no effective edits.
+        if not compile_ok and no_progress_rounds >= 2:
+            compile_error = (
+                compile_output
+                + "\n\nStage 4 aborted early: LLM repairs made no effective source changes "
+                + "for two consecutive rounds."
+            )
+            break
         attempt += 1
 
     if not compile_ok:
@@ -643,6 +950,8 @@ def fix_c_code(
                     status_fn(f"Running C benchmark: {bench_c.stem}…")
                 log.info(f"Running C benchmark: {bench_c.stem}")
                 ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
+                skip_fn_llm_repairs = False
+                bench_succeeded = False
                 for b_attempt in range(max_retries):
                     if ok and c_bin and c_bin.exists():
                         c_data = np.fromfile(str(c_bin), dtype=np.float64)
@@ -652,6 +961,7 @@ def fix_c_code(
                         if c_data.shape == f_data.shape and np.allclose(c_data, f_data, atol=1e-10, rtol=1e-10):
                             bench_results[fn_name] = {"pass": True, "max_abs_diff": 0.0, "c_time_ms": c_time_ms}
                             log.info(f"  {fn_name}: numerical check PASSED, c_time_ms={c_time_ms}")
+                            bench_succeeded = True
                             break
                         max_abs = float(np.max(np.abs(c_data - f_data))) if c_data.shape == f_data.shape else float("inf")
                         bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs, "c_time_ms": c_time_ms}
@@ -663,6 +973,20 @@ def fix_c_code(
                         err = f"Numerical mismatch: max_abs_diff={max_abs:.6e}"
                     else:
                         if not ok:
+                            if _is_non_repairable_bench_error(err):
+                                bench_results[fn_name] = {
+                                    "pass": False,
+                                    "max_abs_diff": None,
+                                    "c_time_ms": None,
+                                    "reason": "non-repairable link/dependency error",
+                                }
+                                all_passed = False
+                                skip_fn_llm_repairs = True
+                                log.warning(
+                                    "  %s: skipping LLM retries due to non-repairable benchmark error",
+                                    fn_name,
+                                )
+                                break
                             _console.print(
                                 f"  [yellow]⚠ C benchmark failed to run[/yellow] for [bold]{fn_name}[/bold]: "
                                 f"[dim]{_first_error_line(err)}[/dim]"
@@ -678,7 +1002,12 @@ def fix_c_code(
                     llm_turns += 1
                     total_retries += 1
                     ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
-                else:
+                if skip_fn_llm_repairs:
+                    raise MaxRetriesExceededError(
+                        "Stage 4 (benchmark)",
+                        BenchmarkRuntimeError(fn_name, err),
+                    )
+                if not bench_succeeded:
                     all_passed = False
                     # Report what went wrong on final failure
                     last = bench_results.get(fn_name, {})
