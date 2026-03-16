@@ -101,11 +101,15 @@ def run_interactive_menu() -> tuple[Path, list[str], Config]:
         8: "LLM: Make Idiomatic",
         9: "Report Generation",
     }
-    stage_choices = [
-        questionary.Choice(f"Stage {i}: {_STAGE_NAMES[i]}", value=i, checked=True)
-        for i in all_stages
-    ]
-    stages = questionary.checkbox("Stages to run:", choices=stage_choices).ask() or all_stages
+    last_stage = questionary.select(
+        "Run up to stage:",
+        choices=[
+            questionary.Choice(f"Stage {i}: {_STAGE_NAMES[i]}", value=i)
+            for i in all_stages
+        ],
+        default=9,
+    ).ask() or 9
+    stages = list(range(1, last_stage + 1))
 
     config = load_config(
         llm_provider=provider,
@@ -114,7 +118,7 @@ def run_interactive_menu() -> tuple[Path, list[str], Config]:
         stages=stages,
     )
 
-    console.print(f"\n[bold]Configuration:[/bold] {provider} / {model} / retries={max_retries} / stages={stages}\n")
+    console.print(f"\n[bold]Configuration:[/bold] {provider} / {model} / retries={max_retries} / stages 1–{last_stage}\n")
     confirm = questionary.confirm("Start pipeline?", default=True).ask()
     if not confirm:
         console.print("[yellow]Cancelled.[/yellow]")
