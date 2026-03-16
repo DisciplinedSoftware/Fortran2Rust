@@ -104,17 +104,20 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
     cargo_toml_path = output_dir / "Cargo.toml"
     cargo_toml_path.write_text(CARGO_TOML_TEMPLATE)
 
-    # Generate src/lib.rs that re-exports all modules
+    # Generate src/lib.rs that re-exports all modules.
+    # c2rust places .rs files in src/ (not in the output root), so compare against src_dir.
     src_dir = output_dir / "src"
     src_dir.mkdir(exist_ok=True)
     lib_rs = src_dir / "lib.rs"
-    if not lib_rs.exists():
-        modules = [f.stem for f in rust_files if f.parent == output_dir]
-        mod_lines = "\n".join(f"pub mod {m};" for m in modules)
-        lib_rs.write_text(
-            f"#![allow(unused)]\n#![allow(non_snake_case)]\n#![allow(non_camel_case_types)]\n{mod_lines}\n"
-        )
-        log.info(f"Scaffolded src/lib.rs with modules: {modules}")
+    modules = sorted(
+        f.stem for f in rust_files
+        if f.parent == src_dir and f.name != "lib.rs"
+    )
+    mod_lines = "\n".join(f"pub mod {m};" for m in modules)
+    lib_rs.write_text(
+        f"#![allow(unused)]\n#![allow(non_snake_case)]\n#![allow(non_camel_case_types)]\n\n{mod_lines}\n"
+    )
+    log.info(f"Wrote src/lib.rs with modules: {modules}")
 
     (output_dir / "c2rust_result.json").write_text(json.dumps({
         "ok": ok,

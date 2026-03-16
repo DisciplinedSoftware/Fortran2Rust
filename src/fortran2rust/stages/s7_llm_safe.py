@@ -74,12 +74,10 @@ def make_safe(
 
     # Count unsafe before
     unsafe_before = 0
-    rs_files = [f for f in output_dir.rglob("*.rs") if "bench" not in f.name and "test" not in f.name]
+    rs_files = [f for f in output_dir.rglob("*.rs") if "bench" not in f.name and "test" not in f.name and f.name != "lib.rs"]
     for f in rs_files:
         unsafe_before += _count_unsafe(f.read_text())
     log.info(f"unsafe blocks before: {unsafe_before} across {len(rs_files)} files")
-
-    # Process each file
     for rs_file in rs_files:
         content = rs_file.read_text()
         n = _count_unsafe(content)

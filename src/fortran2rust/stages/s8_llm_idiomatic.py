@@ -70,7 +70,7 @@ def make_idiomatic(
     llm_turns = 0
     retries = 0
 
-    rs_files = [f for f in output_dir.rglob("*.rs") if "bench" not in f.name and "test" not in f.name]
+    rs_files = [f for f in output_dir.rglob("*.rs") if "bench" not in f.name and "test" not in f.name and f.name != "lib.rs"]
     log.info(f"Processing {len(rs_files)} Rust files")
 
     for rs_file in rs_files:
