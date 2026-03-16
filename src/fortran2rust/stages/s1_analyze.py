@@ -69,7 +69,12 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
             if not stmts:
                 continue
             name = str(stmts[0].items[1]).upper()
-            name_to_file[name] = f
+            # Prefer the file whose stem matches the function name (e.g. xerbla.f for XERBLA).
+            # This prevents test/combined files (e.g. zblat3.f) from overwriting a
+            # proper single-routine file even if they also define the same symbol.
+            existing = name_to_file.get(name)
+            if existing is None or f.stem.upper() == name:
+                name_to_file[name] = f
 
             calls: set[str] = set()
             # Subroutine calls: CALL FOO(...)
