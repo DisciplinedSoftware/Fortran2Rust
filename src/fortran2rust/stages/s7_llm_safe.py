@@ -23,7 +23,7 @@ from ._bench import (
     print_bench_summary,
     run_rust_benchmarks,
 )
-from ._llm_cleanup import compact_rust_for_llm, restore_rust_after_llm, strip_markdown_fences
+from ._llm_cleanup import compact_rust_for_llm, filter_errors_for_file, restore_rust_after_llm, strip_markdown_fences
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -182,7 +182,7 @@ def make_safe(
                         "Fix compilation error after removing unsafe blocks in Rust code. "
                         "Leading comments were removed before sending to reduce token usage."
                     ),
-                    error=build_output,
+                    error=filter_errors_for_file(build_output, rs_file.name),
                     code=compact_code,
                     attempt=attempt,
                 ), preserved_prefix

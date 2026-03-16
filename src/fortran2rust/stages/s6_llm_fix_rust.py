@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
 from ._bench import _fix_bench_extern_types, _fix_stable_rust_features, _get_failing_rust_files, print_bench_summary, run_rust_benchmarks
-from ._llm_cleanup import compact_rust_for_llm, restore_rust_files_after_llm, split_llm_file_response, strip_markdown_fences
+from ._llm_cleanup import compact_rust_for_llm, filter_errors_for_file, restore_rust_files_after_llm, split_llm_file_response, strip_markdown_fences
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -138,7 +138,7 @@ def fix_rust_code(
                     "Leading comments were removed before sending to reduce token usage. "
                     "Fix all compilation errors shown."
                 ),
-                error=build_output,
+                error=filter_errors_for_file(build_output, rs_file.name),
                 code=compact_code,
                 attempt=attempt,
             )

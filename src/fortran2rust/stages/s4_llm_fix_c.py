@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError, NumericalPrecisionError, BenchmarkRuntimeError
+from ._llm_cleanup import filter_errors_for_file
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -594,7 +595,7 @@ def fix_c_code(
             if status_fn:
                 status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
             log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
-            _repair_file(llm, target, compile_output, attempt=attempt)
+            _repair_file(llm, target, filter_errors_for_file(compile_output, target.name), attempt=attempt)
 
         with ThreadPoolExecutor(max_workers=len(failing_files)) as executor:
             list(executor.map(_fix_one, failing_files))
@@ -673,7 +674,7 @@ def fix_c_code(
                     if status_fn:
                         status_fn(f"LLM: fixing numerical precision in {bench_c.name} (attempt {b_attempt+1}/{max_retries})…")
                     log.info(f"LLM bench repair attempt {b_attempt+1}/{max_retries} for {bench_c.name}")
-                    _repair_file(llm, bench_c, err, attempt=b_attempt)
+                    _repair_file(llm, bench_c, filter_errors_for_file(err, bench_c.name), attempt=b_attempt)
                     llm_turns += 1
                     total_retries += 1
                     ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
