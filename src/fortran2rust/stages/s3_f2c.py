@@ -75,15 +75,20 @@ def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path, statu
         if status_fn:
             status_fn(f"f2c: converting {f.name} ({i+1}/{total})…")
 
+        # Copy .f file to output_dir so f2c writes .c there
+        dest_f = output_dir / f.name
+        if dest_f != f:
+            shutil.copy(f, dest_f)
+
         result = subprocess.run(
-            ["f2c", "-a", str(f.resolve())],
+            ["f2c", "-a", dest_f.name],
             capture_output=True,
             text=True,
             cwd=str(output_dir),
             timeout=60,
         )
 
-        c_name = f.with_suffix(".c").name
+        c_name = dest_f.with_suffix(".c").name
         c_path = output_dir / c_name
         if c_path.exists():
             c_files.append(str(c_path))
