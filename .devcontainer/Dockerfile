@@ -32,3 +32,14 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 # Give vscode user write access to the venv so postCreateCommand can install the package
 RUN chown -R vscode:vscode /opt/venv
+
+# c2rust — transpiles f2c-generated C to Rust (supports LLVM 14-19)
+USER vscode
+RUN LIBCLANG_PATH=/usr/lib/llvm-17/lib \
+    LLVM_CONFIG_PATH=/usr/bin/llvm-config-17 \
+    cargo install c2rust
+USER root
+# Make c2rust available system-wide and add libclang-17 to the dynamic linker path
+RUN cp /home/vscode/.cargo/bin/c2rust /usr/local/bin/ \
+    && echo "/usr/lib/llvm-17/lib" > /etc/ld.so.conf.d/llvm-17.conf \
+    && ldconfig
