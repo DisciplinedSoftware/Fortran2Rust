@@ -179,7 +179,7 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
 
     report_path = run_dir / "report.html"
     # Only open preview if stage 9 actually ran and produced the report
-    if 9 in results and "error" not in results[9] and report_path.exists():
+    if report_path.exists():
         import subprocess as _sp
         try:
             _sp.run(["code", "--reuse-window", str(report_path)], check=False, timeout=5)

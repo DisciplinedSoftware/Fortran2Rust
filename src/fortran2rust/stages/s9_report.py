@@ -112,19 +112,6 @@ tr:last-child td { border-bottom: none; }
   </table>
 </div>
 
-<div class="card">
-  <h2>Artifact Manifest</h2>
-  <table>
-    <tr><th>File</th><th>Size</th></tr>
-    {% for artifact in artifacts %}
-    <tr>
-      <td>{{ artifact.path }}</td>
-      <td>{{ artifact.size }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
-
 </body>
 </html>"""
 
@@ -166,13 +153,6 @@ MD_TEMPLATE = """# Fortran2Rust Pipeline Report
 |-------|------|--------|-----------|-------|
 {% for stage in stage_log %}| {{ stage.num }} | {{ stage.name }} | {{ 'PASS' if stage.ok else 'FAIL' }} | {{ stage.llm_turns }} | {{ stage.notes }} |
 {% endfor %}
-
-## Artifact Manifest
-
-| File | Size |
-|------|------|
-{% for artifact in artifacts %}| {{ artifact.path }} | {{ artifact.size }} |
-{% endfor %}
 """
 
 STAGE_NAMES = {
@@ -186,26 +166,6 @@ STAGE_NAMES = {
     8: "LLM: Make Idiomatic",
     9: "Report Generation",
 }
-
-
-def _fmt_size(n: int) -> str:
-    for unit in ["B", "KB", "MB", "GB"]:
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
-
-
-def _collect_artifacts(run_dir: Path) -> list[dict]:
-    artifacts = []
-    for f in sorted(run_dir.rglob("*")):
-        if f.is_file() and not f.name.endswith(".bin"):
-            try:
-                size = _fmt_size(f.stat().st_size)
-                artifacts.append({"path": str(f.relative_to(run_dir)), "size": size})
-            except OSError:
-                pass
-    return artifacts
 
 
 def _collect_stage_log(run_dir: Path, stage_results: dict) -> list[dict]:
@@ -288,7 +248,6 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
         "perf_table": perf_table,
         "precision_table": precision_table,
         "stage_log": stage_log,
-        "artifacts": artifacts,
     }
 
     env = Environment(loader=BaseLoader())
