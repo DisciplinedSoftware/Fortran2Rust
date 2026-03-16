@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
+from ._bench import print_bench_summary, run_rust_benchmarks
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -128,6 +129,15 @@ def make_idiomatic(
         "llm_turns": llm_turns,
         "retries": retries,
     }
+
+    # ── Benchmarks: build bins + run against Fortran baseline ─────────────────
+    if status_fn:
+        status_fn("Running Rust benchmarks…")
+    log.info("Running Rust benchmarks")
+    bench_results = run_rust_benchmarks(output_dir, baseline_dir, cargo_toml, log, status_fn)
+    print_bench_summary(bench_results, {})
+    result["bench_results"] = bench_results
+
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
     log.info("Stage complete")
     return result

@@ -173,6 +173,32 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                                 parts.append(f"[red]{fn}[/red] ✗ ({detail})")
                         console.print(f"  Benchmarks: {' | '.join(parts)}")
 
+                elif stage_num in (6, 7, 8):
+                    bench_results = results[stage_num].get("bench_results", {})
+                    if bench_results:
+                        fortran_times = {
+                            fn: results.get(2, {}).get("benchmarks", {}).get(fn, {}).get("time_ms")
+                            for fn in bench_results
+                        }
+                        parts = []
+                        for fn, br in bench_results.items():
+                            diff = br.get("max_abs_diff")
+                            diff_str = f"Δ={diff:.2e}" if diff is not None else "Δ=?"
+                            r_ms = br.get("time_ms")
+                            f_ms = fortran_times.get(fn)
+                            if r_ms is not None and f_ms:
+                                timing_str = f"Rust:{r_ms:.1f}ms, {r_ms/f_ms:.2f}x Fortran"
+                            elif r_ms is not None:
+                                timing_str = f"Rust:{r_ms:.1f}ms"
+                            else:
+                                timing_str = None
+                            detail = f"{diff_str}, {timing_str}" if timing_str else diff_str
+                            if br.get("run_ok"):
+                                parts.append(f"[green]{fn}[/green] ✓ ({detail})")
+                            else:
+                                parts.append(f"[red]{fn}[/red] ✗ (run failed)")
+                        console.print(f"  Benchmarks: {' | '.join(parts)}")
+
             except Exception as e:
                 console.print(f"  [red]✗ Stage {stage_num} failed: {e}[/red]")
                 results[stage_num] = {"error": str(e)}

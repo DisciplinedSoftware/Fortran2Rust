@@ -7,13 +7,13 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 from rich.console import Console
 
 if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
+from ._bench import print_bench_summary, run_rust_benchmarks
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -56,34 +56,6 @@ def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
         timeout=300,
     )
     return result.returncode == 0, result.stdout + result.stderr
-
-
-def _run_bench(cargo_toml: Path, baseline_dir: Path) -> dict:
-    """Run the compiled Rust benchmark, capture timing and numerical output. No LLM gating."""
-    result: dict = {"time_ms": None, "max_abs_diff": None, "run_ok": False, "run_error": ""}
-    try:
-        run = subprocess.run(
-            ["cargo", "run", "--manifest-path", str(cargo_toml)],
-            capture_output=True, text=True, cwd=str(baseline_dir), timeout=300,
-        )
-        result["run_ok"] = run.returncode == 0
-        result["run_error"] = run.stderr + run.stdout if run.returncode != 0 else ""
-        match = re.search(r"(?:RUST|C)_TIME_MS=\s*([\d.]+)", run.stdout)
-        if match:
-            result["time_ms"] = float(match.group(1))
-
-        # Compare output against Fortran baseline
-        for rust_bin in baseline_dir.glob("bench_*_output.bin"):
-            fn_name = re.sub(r"^bench_|_output\.bin$", "", rust_bin.name)
-            fortran_bin = baseline_dir / f"bench_{fn_name}_output.bin"
-            if rust_bin != fortran_bin and fortran_bin.exists():
-                r_data = np.fromfile(str(rust_bin), dtype=np.float64)
-                f_data = np.fromfile(str(fortran_bin), dtype=np.float64)
-                if r_data.shape == f_data.shape:
-                    result["max_abs_diff"] = float(np.max(np.abs(r_data - f_data)))
-    except Exception as e:
-        result["run_error"] = str(e)
-    return result
 
 
 def fix_rust_code(
@@ -154,23 +126,19 @@ def fix_rust_code(
         exc = CompilationError("Rust", build_error)
         raise MaxRetriesExceededError("Stage 6 (fix Rust)", exc)
 
-    # ── Timing + numerical accuracy capture (report only, no LLM gating) ─────
+    # ── Benchmarks: build bins + run against Fortran baseline ─────────────────
     if status_fn:
-        status_fn("Running Rust benchmark (for report)…")
-    log.info("Running Rust benchmark")
-    bench_data = _run_bench(cargo_toml, baseline_dir)
-    if bench_data["max_abs_diff"] is not None:
-        _console.print(
-            f"  [dim]↳ numerical diff vs Fortran: max abs = {bench_data['max_abs_diff']:.3e}[/dim]"
-        )
-        log.info(f"  numerical diff vs Fortran: max abs = {bench_data['max_abs_diff']:.3e}")
+        status_fn("Running Rust benchmarks…")
+    log.info("Running Rust benchmarks")
+    bench_results = run_rust_benchmarks(output_dir, baseline_dir, cargo_toml, log, status_fn)
+    print_bench_summary(bench_results, {})
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
     result = {
         "build_ok": build_ok,
         "llm_turns": llm_turns,
         "retries": retries,
-        **bench_data,
+        "bench_results": bench_results,
     }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
     log.info("Stage complete")
