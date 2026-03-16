@@ -12,7 +12,7 @@ class GoogleClient(LLMClient):
         self.model = genai.GenerativeModel(model, system_instruction=None)
         self._model_name = model
 
-    def complete(self, system: str, user: str) -> str:
+    def _call_llm(self, system: str, user: str) -> str:
         model = genai.GenerativeModel(self._model_name, system_instruction=system)
         resp = model.generate_content(user)
         if resp.usage_metadata:

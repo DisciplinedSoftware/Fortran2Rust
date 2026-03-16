@@ -11,7 +11,7 @@ class OllamaClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    def complete(self, system: str, user: str) -> str:
+    def _call_llm(self, system: str, user: str) -> str:
         payload = {
             "model": self.model,
             "messages": [

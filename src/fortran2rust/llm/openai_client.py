@@ -11,7 +11,7 @@ class OpenAIClient(LLMClient):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def complete(self, system: str, user: str) -> str:
+    def _call_llm(self, system: str, user: str) -> str:
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],

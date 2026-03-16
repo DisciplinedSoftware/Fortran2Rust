@@ -329,6 +329,9 @@ def fix_c_code(
             bench_ok = all_passed
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
+    (output_dir / "llm_conversations.json").write_text(
+        json.dumps(llm.pop_conversation_log(), indent=2)
+    )
 
     # Generate compile_commands.json with absolute paths for c2rust (Stage 5).
     # Include all .c files — bench drivers are transpiled too so Rust benchmarks can be built.

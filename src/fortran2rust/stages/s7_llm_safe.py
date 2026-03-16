@@ -149,8 +149,10 @@ def make_safe(
     log.info(f"unsafe blocks after: {unsafe_after} (removed {unsafe_before - unsafe_after})")
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
+    (output_dir / "llm_conversations.json").write_text(
+        json.dumps(llm.pop_conversation_log(), indent=2)
+    )
     result = {
-        "unsafe_before": unsafe_before,
         "unsafe_after": unsafe_after,
         "llm_turns": llm_turns,
         "retries": retries,

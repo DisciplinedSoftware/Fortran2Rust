@@ -124,6 +124,9 @@ def make_idiomatic(
                 shutil.copy(orig, rs_file)
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
+    (output_dir / "llm_conversations.json").write_text(
+        json.dumps(llm.pop_conversation_log(), indent=2)
+    )
     result = {
         "files_processed": len(rs_files),
         "llm_turns": llm_turns,

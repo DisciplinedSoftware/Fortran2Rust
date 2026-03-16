@@ -28,15 +28,34 @@ class TokenUsage:
 class LLMClient(ABC):
     def __init__(self) -> None:
         self.last_usage: TokenUsage = TokenUsage()
+        self._conversation_log: list[dict] = []
 
     def _record_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
         self.last_usage = TokenUsage(prompt_tokens, completion_tokens)
         _console.print(f"  [dim]↳ {self.last_usage}[/dim]")
 
     @abstractmethod
-    def complete(self, system: str, user: str) -> str:
-        """Send a chat completion and return the assistant's text."""
+    def _call_llm(self, system: str, user: str) -> str:
+        """Call the LLM API and return the assistant's response text."""
         ...
+
+    def complete(self, system: str, user: str) -> str:
+        """Send a chat completion, log the full conversation, and return the response."""
+        response = self._call_llm(system, user)
+        self._conversation_log.append({
+            "system": system,
+            "user": user,
+            "response": response,
+            "prompt_tokens": self.last_usage.prompt_tokens,
+            "completion_tokens": self.last_usage.completion_tokens,
+        })
+        return response
+
+    def pop_conversation_log(self) -> list[dict]:
+        """Return all conversations recorded since the last call and reset the log."""
+        log = self._conversation_log
+        self._conversation_log = []
+        return log
 
     def repair(self, context: str, error: str, code: str) -> str:
         """Standard repair prompt for fixing broken code."""

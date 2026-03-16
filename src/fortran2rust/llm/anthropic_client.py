@@ -11,7 +11,7 @@ class AnthropicClient(LLMClient):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
 
-    def complete(self, system: str, user: str) -> str:
+    def _call_llm(self, system: str, user: str) -> str:
         msg = self.client.messages.create(
             model=self.model,
             max_tokens=8192,

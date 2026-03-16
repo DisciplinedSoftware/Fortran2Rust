@@ -143,8 +143,10 @@ def fix_rust_code(
     print_bench_summary(bench_results, {})
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
+    (output_dir / "llm_conversations.json").write_text(
+        json.dumps(llm.pop_conversation_log(), indent=2)
+    )
     result = {
-        "build_ok": build_ok,
         "llm_turns": llm_turns,
         "retries": retries,
         "bench_results": bench_results,
