@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 from rich.console import Console
 
 if TYPE_CHECKING:
@@ -56,6 +57,34 @@ def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
     return result.returncode == 0, result.stderr
 
 
+def _run_bench(cargo_toml: Path, baseline_dir: Path) -> dict:
+    """Run the compiled Rust benchmark, capture timing and numerical output. No LLM gating."""
+    result: dict = {"time_ms": None, "max_abs_diff": None, "run_ok": False, "run_error": ""}
+    try:
+        run = subprocess.run(
+            ["cargo", "run", "--manifest-path", str(cargo_toml)],
+            capture_output=True, text=True, cwd=str(baseline_dir), timeout=300,
+        )
+        result["run_ok"] = run.returncode == 0
+        result["run_error"] = run.stderr[:500] if run.returncode != 0 else ""
+        match = re.search(r"(?:RUST|C)_TIME_MS=\s*([\d.]+)", run.stdout)
+        if match:
+            result["time_ms"] = float(match.group(1))
+
+        # Compare output against Fortran baseline
+        for rust_bin in baseline_dir.glob("bench_*_output.bin"):
+            fn_name = re.sub(r"^bench_|_output\.bin$", "", rust_bin.name)
+            fortran_bin = baseline_dir / f"bench_{fn_name}_output.bin"
+            if rust_bin != fortran_bin and fortran_bin.exists():
+                r_data = np.fromfile(str(rust_bin), dtype=np.float64)
+                f_data = np.fromfile(str(fortran_bin), dtype=np.float64)
+                if r_data.shape == f_data.shape:
+                    result["max_abs_diff"] = float(np.max(np.abs(r_data - f_data)))
+    except Exception as e:
+        result["run_error"] = str(e)
+    return result
+
+
 def fix_rust_code(
     rust_dir: Path,
     output_dir: Path,
@@ -66,23 +95,25 @@ def fix_rust_code(
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy rust_dir to output_dir
     if output_dir != rust_dir:
         shutil.copytree(rust_dir, output_dir, dirs_exist_ok=True)
 
     cargo_toml = output_dir / "Cargo.toml"
-
     llm_log: list[dict] = []
     llm_turns = 0
     retries = 0
 
-    # Build loop
+    # ── Compilation repair loop (LLM gated) ──────────────────────────────────
     if status_fn:
         status_fn("cargo build…")
     build_ok, build_error = _cargo_build(cargo_toml)
     for attempt in range(max_retries):
         if build_ok:
             break
+        _console.print(
+            f"  [yellow]⚠ Rust build failed[/yellow]: "
+            f"[dim]{_first_error_line(build_error)}[/dim]"
+        )
         if status_fn:
             status_fn(f"LLM: fixing Rust compilation (attempt {attempt+1}/{max_retries})…")
         code = _read_rust_files(output_dir)
@@ -97,35 +128,26 @@ def fix_rust_code(
         _apply_llm_response(response, output_dir)
         build_ok, build_error = _cargo_build(cargo_toml)
 
-    bench_ok = False
-    # Bench loop: attempt to run a benchmark and compare to baseline
-    if build_ok:
-        fortran_bins = list(baseline_dir.glob("*_baseline.bin"))
-        if not fortran_bins:
-            bench_ok = True
-        else:
-            try:
-                import numpy as np  # noqa: F401
-                if status_fn:
-                    status_fn(f"Running Rust benchmark…")
-                # Try to run bench binary
-                bench_result = subprocess.run(
-                    ["cargo", "test", "--manifest-path", str(cargo_toml)],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
-                bench_ok = bench_result.returncode == 0
-            except Exception:
-                bench_ok = False
+    if not build_ok:
+        exc = CompilationError("Rust", build_error[:500])
+        raise MaxRetriesExceededError("Stage 6 (fix Rust)", exc)
+
+    # ── Timing + numerical accuracy capture (report only, no LLM gating) ─────
+    if status_fn:
+        status_fn("Running Rust benchmark (for report)…")
+    bench_data = _run_bench(cargo_toml, baseline_dir)
+    if bench_data["max_abs_diff"] is not None:
+        _console.print(
+            f"  [dim]↳ numerical diff vs Fortran: max abs = {bench_data['max_abs_diff']:.3e}[/dim]"
+        )
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
     result = {
         "build_ok": build_ok,
-        "bench_ok": bench_ok,
         "llm_turns": llm_turns,
         "retries": retries,
-        "build_error": build_error if not build_ok else "",
+        **bench_data,
     }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
     return result
+

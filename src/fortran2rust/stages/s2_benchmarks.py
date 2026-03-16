@@ -327,19 +327,28 @@ def generate_benchmarks(
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    N = N_DEFAULT
+
+    # ── Phase 1: datasets (always first, unconditionally) ────────────────────
+    # Datasets are the shared ground truth for Fortran, C, and Rust.
+    # They are generated before any compilation so they're always present.
+    if status_fn:
+        status_fn(f"Generating shared input datasets for {len(entry_points)} function(s)…")
+    all_datasets: dict[str, dict] = {}
+    for ep in entry_points:
+        dataset = generate_dataset(ep, N, output_dir)
+        all_datasets[ep] = {k: str(v) for k, v in dataset.items()}
+    (output_dir / "datasets.json").write_text(json.dumps(all_datasets, indent=2))
+
+    # ── Phase 2: benchmark drivers (Fortran + C) ──────────────────────────────
     benchmarks: dict[str, dict] = {}
     bench_files: list[str] = []      # Fortran .f drivers (gfortran, modern syntax)
     bench_c_files: list[str] = []    # C drivers (written directly, no f2c needed)
-    N = N_DEFAULT
 
     for ep in entry_points:
         ep_upper = ep.upper()
         ep_lower = ep.lower()
-
-        # Generate shared dataset files
-        if status_fn:
-            status_fn(f"Generating dataset for {ep}…")
-        dataset = generate_dataset(ep, N, output_dir)
+        dataset_paths = {k: Path(v) for k, v in all_datasets[ep].items()}
 
         if ep_upper in KNOWN_BLAS:
             driver_src = _make_dgemm_driver(ep, N)
@@ -364,7 +373,7 @@ def generate_benchmarks(
             prec_file.write_text(precision_src)
             bench_files.append(str(prec_file))
 
-        # Only compile the dep_files from the dependency graph
+        # Compile and run Fortran benchmark to produce the reference output
         fortran_deps = [str(f) for f in dep_files if f.exists()]
         compile_cmd = (
             ["gfortran", "-O2", str(driver_file)]
@@ -374,7 +383,7 @@ def generate_benchmarks(
 
         bench_info: dict = {
             "driver_file": str(driver_file),
-            "dataset": {k: str(v) for k, v in dataset.items()},
+            "dataset": {k: str(v) for k, v in dataset_paths.items()},
             "compile_cmd": compile_cmd,
             "compile_ok": False,
             "compile_error": "",
@@ -384,7 +393,7 @@ def generate_benchmarks(
 
         try:
             if status_fn:
-                status_fn(f"Compiling benchmark for {ep}…")
+                status_fn(f"Compiling Fortran benchmark for {ep}…")
             result = subprocess.run(
                 compile_cmd, capture_output=True, text=True,
                 cwd=str(output_dir), timeout=120,
@@ -398,11 +407,9 @@ def generate_benchmarks(
                     capture_output=True, text=True,
                     cwd=str(output_dir), timeout=300,
                 )
-                stdout = run_result.stdout
-                match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", stdout)
+                match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", run_result.stdout)
                 if match:
                     bench_info["time_ms"] = float(match.group(1))
-
                 bin_file = output_dir / f"bench_{ep_lower}_output.bin"
                 if bin_file.exists():
                     bench_info["output_file"] = str(bin_file)
@@ -415,7 +422,13 @@ def generate_benchmarks(
 
         benchmarks[ep] = bench_info
 
-    result_data = {"benchmarks": benchmarks, "bench_files": bench_files, "bench_c_files": bench_c_files}
+    result_data = {
+        "benchmarks": benchmarks,
+        "bench_files": bench_files,
+        "bench_c_files": bench_c_files,
+        "datasets": all_datasets,
+    }
     (output_dir / "benchmarks.json").write_text(json.dumps(result_data, indent=2, default=str))
     return result_data
+
 

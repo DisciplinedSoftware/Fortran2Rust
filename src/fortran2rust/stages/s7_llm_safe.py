@@ -7,13 +7,27 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
+from rich.console import Console
+
 if TYPE_CHECKING:
     from ..llm.base import LLMClient
+
+from ..exceptions import CompilationError, MaxRetriesExceededError
+
+_console = Console(stderr=True)
 
 SAFE_SYSTEM_PROMPT = (
     "You are a Rust expert. Rewrite this code to eliminate all unsafe blocks while preserving "
     "exact numerical behavior. Return ONLY the complete corrected file, no explanations, no markdown fences."
 )
+
+
+def _first_error_line(error: str) -> str:
+    for line in error.splitlines():
+        if "error" in line.lower() and line.strip():
+            return line.strip()[:120]
+    return error.strip()[:120]
 
 
 def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
@@ -78,8 +92,12 @@ def make_safe(
         for attempt in range(max_retries):
             if build_ok:
                 break
+            _console.print(
+                f"  [yellow]⚠ Safe Rust build failed[/yellow] in [bold]{rs_file.name}[/bold]: "
+                f"[dim]{_first_error_line(build_error)}[/dim]"
+            )
             if status_fn:
-                status_fn(f"Verifying safe Rust builds… (attempt {attempt+1}/{max_retries})")
+                status_fn(f"LLM: fixing safe Rust build (attempt {attempt+1}/{max_retries})…")
             repair_response = llm.repair(
                 context="Fix compilation error after removing unsafe blocks in Rust code.",
                 error=build_error,

@@ -7,8 +7,14 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.console import Console
+
 if TYPE_CHECKING:
     from ..llm.base import LLMClient
+
+from ..exceptions import CompilationError, MaxRetriesExceededError
+
+_console = Console(stderr=True)
 
 IDIOMATIC_SYSTEM_PROMPT = (
     "You are a Rust expert. Rewrite this Rust code to be idiomatic: use iterators instead of raw loops, "
@@ -17,6 +23,13 @@ IDIOMATIC_SYSTEM_PROMPT = (
     "Preserve exact numerical behavior. "
     "Return ONLY the complete corrected file, no explanations, no markdown fences."
 )
+
+
+def _first_error_line(error: str) -> str:
+    for line in error.splitlines():
+        if "error" in line.lower() and line.strip():
+            return line.strip()[:120]
+    return error.strip()[:120]
 
 
 def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
@@ -67,8 +80,12 @@ def make_idiomatic(
         for attempt in range(max_retries):
             if build_ok:
                 break
+            _console.print(
+                f"  [yellow]⚠ Idiomatic Rust build failed[/yellow] in [bold]{rs_file.name}[/bold]: "
+                f"[dim]{_first_error_line(build_error)}[/dim]"
+            )
             if status_fn:
-                status_fn(f"Verifying idiomatic Rust builds… (attempt {attempt+1}/{max_retries})")
+                status_fn(f"LLM: fixing idiomatic Rust build (attempt {attempt+1}/{max_retries})…")
             repair_response = llm.repair(
                 context="Fix compilation error after making Rust code idiomatic.",
                 error=build_error,
