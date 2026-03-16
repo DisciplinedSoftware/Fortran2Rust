@@ -9,10 +9,66 @@ from pathlib import Path
 import numpy as np
 from rich.console import Console
 
+from .s2_benchmarks import _blas_precision
+
 _console = Console(stderr=True)
 
 # Must match the package name in the Cargo.toml template (s5_c2rust.py)
 _CRATE_NAME = "fortran2rust_output"
+
+
+def _fix_bench_extern_types(bench_rs: Path) -> None:
+    """
+    Patch a c2rust-transpiled bench_*.rs for stable-Rust compatibility.
+
+    c2rust emits ``extern_types`` (an unstable feature) for opaque C types
+    (``_IO_wide_data``, ``_IO_codecvt``, ``_IO_marker`` …).  This function
+    replaces them with ``#[repr(C)] struct`` declarations so the file
+    compiles on stable Rust, and removes ``extern_types`` from the feature
+    list (leaving any other features, e.g. ``raw_ref_op``, intact).
+
+    The transformation is idempotent — if the file was already patched it
+    returns immediately.
+    """
+    text = bench_rs.read_text()
+
+    # Find all ``pub type NAME;`` lines inside extern "C" blocks
+    extern_type_names = re.findall(
+        r"^\s{4}pub type ([A-Za-z_]\w*);\s*$", text, re.MULTILINE
+    )
+    if not extern_type_names:
+        return  # Already patched or no extern types present
+
+    # Stable opaque-type replacements — sized, non-constructible, correct ABI
+    stable_defs = "\n".join(
+        f"#[repr(C)] pub struct {n} {{ "
+        f"_priv: [u8; 0], "
+        f"_marker: ::core::marker::PhantomData<(*mut u8, ::core::marker::PhantomPinned)> }}"
+        for n in extern_type_names
+    )
+
+    # Remove the ``pub type NAME;`` lines from extern "C" blocks
+    for name in extern_type_names:
+        text = re.sub(
+            rf"^\s+pub type {re.escape(name)};\s*\n", "", text, flags=re.MULTILINE
+        )
+
+    # Remove ``extern_types`` from any ``#![feature(...)]`` attribute,
+    # dropping the whole attribute if it becomes empty.
+    def _strip(m: re.Match) -> str:
+        flags = [f.strip() for f in m.group(1).split(",")
+                 if f.strip() and f.strip() != "extern_types"]
+        return f'#![feature({", ".join(flags)})]' if flags else ""
+
+    text = re.sub(r"#!\[feature\(([^)]*)\)\]", _strip, text)
+
+    # Insert stable defs right after the last ``#![...]`` crate attribute
+    last_end = 0
+    for m in re.finditer(r"^#!\[.*\]\n", text, re.MULTILINE):
+        last_end = m.end()
+    text = text[:last_end] + stable_defs + "\n" + text[last_end:]
+
+    bench_rs.write_text(text)
 
 
 def run_rust_benchmarks(
@@ -27,9 +83,13 @@ def run_rust_benchmarks(
     against the Fortran baseline. Purely informational — never raises.
 
     For each src/bench_{fn}.rs in output_dir:
-      - Generates a thin safe wrapper  src/main_bench_{fn}.rs
-      - Adds a [[bin]] entry to Cargo.toml
-      - Builds with `cargo build --bins`
+      - Removes the ``pub mod bench_{fn};`` declaration from lib.rs so the
+        file can be compiled as a standalone binary (not a library module).
+        This is necessary for the ``#![feature(...)]`` attributes inside the
+        file to apply at the crate level.
+      - Patches extern-type declarations to stable-Rust ``#[repr(C)]`` structs.
+      - Adds a ``[[bin]]`` entry to Cargo.toml pointing directly at the file.
+      - Builds with ``cargo build --bins``
       - Copies dataset_*.bin files from baseline_dir into output_dir
       - Runs the binary from output_dir, parses C_TIME_MS / RUST_TIME_MS
       - Compares bench_{fn}_output.bin against baseline_dir/bench_{fn}_output.bin
@@ -42,24 +102,30 @@ def run_rust_benchmarks(
     if not bench_rs_files:
         return {}
 
-    # Append [[bin]] entries + wrapper files for each bench module
+    # Remove bench_* module declarations from lib.rs so the files can be used
+    # directly as binary crate roots (c2rust already emits `pub fn main()`).
+    lib_rs = src_dir / "lib.rs"
+    if lib_rs.exists():
+        lib_text = lib_rs.read_text()
+        cleaned = re.sub(
+            r"^[^\S\n]*pub mod bench_[^\n]*\n", "", lib_text, flags=re.MULTILINE
+        )
+        if cleaned != lib_text:
+            lib_rs.write_text(cleaned)
+            log.info("Removed pub mod bench_* declarations from lib.rs")
+
+    # Add [[bin]] entries that point directly at each bench_*.rs file.
+    # No thin-wrapper is needed — c2rust generates `pub fn main()` for them.
     cargo_content = cargo_toml.read_text()
     for bench_rs in bench_rs_files:
         stem = bench_rs.stem  # e.g. bench_dgemm
         if f'name = "{stem}"' in cargo_content:
             continue
-        wrapper = src_dir / f"main_{stem}.rs"
-        if not wrapper.exists():
-            # Thin safe wrapper — calls the (possibly unsafe) transpiled main()
-            wrapper.write_text(
-                f"fn main() {{\n"
-                f"    #[allow(unsafe_code)]\n"
-                f"    unsafe {{ {_CRATE_NAME}::{stem}::main(); }}\n"
-                f"}}\n"
-            )
+        _fix_bench_extern_types(bench_rs)
+        log.info(f"Adding [[bin]] for {stem} (direct, no wrapper)")
         cargo_content += (
             f'\n[[bin]]\nname = "{stem}"\n'
-            f'path = "src/main_{stem}.rs"\n'
+            f'path = "src/{stem}.rs"\n'
         )
     cargo_toml.write_text(cargo_content)
 
@@ -127,8 +193,9 @@ def run_rust_benchmarks(
 
             rust_out = output_dir / f"bench_{fn_name}_output.bin"
             if rust_out.exists():
-                r_data = np.fromfile(str(rust_out), dtype=np.float64)
-                f_data = np.fromfile(str(fortran_bin), dtype=np.float64)
+                dtype = np.dtype(_blas_precision(fn_name).numpy_dtype)
+                r_data = np.fromfile(str(rust_out), dtype=dtype)
+                f_data = np.fromfile(str(fortran_bin), dtype=dtype)
                 if r_data.shape == f_data.shape:
                     entry["max_abs_diff"] = float(np.max(np.abs(r_data - f_data)))
                     log.info(
