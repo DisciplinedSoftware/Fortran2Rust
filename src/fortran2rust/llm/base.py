@@ -6,6 +6,16 @@ from dataclasses import dataclass, field
 
 from rich.console import Console
 
+_MAX_ERROR_LINES = 60
+
+
+def _truncate_error(error: str, max_lines: int = _MAX_ERROR_LINES) -> str:
+    """Cap compiler error output so it doesn't dominate the repair prompt."""
+    lines = error.splitlines()
+    if len(lines) <= max_lines:
+        return error
+    return "\n".join(lines[:max_lines]) + f"\n[... {len(lines) - max_lines} more lines truncated ...]"
+
 _console = Console(stderr=True)
 
 
@@ -83,7 +93,7 @@ class LLMClient(ABC):
         )
         # CODE first: it is the largest stable portion and benefits most from
         # prefix-based prompt caching (e.g. Anthropic's cache_control).
-        user = f"CODE:\n{code}\n\nERROR:\n{error}\n\nCONTEXT:\n{context}"
+        user = f"CODE:\n{code}\n\nERROR:\n{_truncate_error(error)}\n\nCONTEXT:\n{context}"
         if attempt > 0:
             user += (
                 f"\n\nNOTE: {attempt} previous attempt(s) failed to fix this. "
