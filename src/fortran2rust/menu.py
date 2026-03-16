@@ -53,7 +53,11 @@ def run_interactive_menu() -> tuple[Path, list[str], Config]:
 
     if ep_choice == "List all and select interactively":
         from .stages.s1_analyze import list_entry_points
-        all_eps = list_entry_points(library_path)
+        with console.status("[bold blue]Scanning Fortran files…") as spin:
+            all_eps = list_entry_points(
+                library_path,
+                status_fn=lambda msg: spin.update(f"[bold blue]{msg}"),
+            )
         if not all_eps:
             console.print("[yellow]No entry points found.[/yellow]")
             entry_points: list[str] = []
@@ -64,7 +68,11 @@ def run_interactive_menu() -> tuple[Path, list[str], Config]:
             ).ask() or []
     elif ep_choice == "Convert entire library (all entry points)":
         from .stages.s1_analyze import list_entry_points
-        entry_points = list_entry_points(library_path)
+        with console.status("[bold blue]Scanning Fortran files…") as spin:
+            entry_points = list_entry_points(
+                library_path,
+                status_fn=lambda msg: spin.update(f"[bold blue]{msg}"),
+            )
     else:
         names = questionary.text("Enter function names (comma-separated):").ask()
         entry_points = [n.strip() for n in names.split(",") if n.strip()]
