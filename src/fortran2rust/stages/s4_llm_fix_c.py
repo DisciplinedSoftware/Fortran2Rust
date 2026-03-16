@@ -445,7 +445,6 @@ def _compact_c_for_llm(code: str) -> tuple[str, str]:
 
     compact_lines: list[str] = []
     in_block_comment = False
-    previous_blank = False
     for line in lines[body_start:]:
         stripped = line.strip()
         if in_block_comment:
@@ -459,12 +458,8 @@ def _compact_c_for_llm(code: str) -> tuple[str, str]:
         if stripped.startswith("//"):
             continue
         if not stripped:
-            if not previous_blank and compact_lines:
-                compact_lines.append("")
-            previous_blank = True
             continue
         compact_lines.append(line.rstrip())
-        previous_blank = False
 
     compact_code = "\n".join(compact_lines).strip()
     preserved_banner = "\n".join(banner_lines).strip()

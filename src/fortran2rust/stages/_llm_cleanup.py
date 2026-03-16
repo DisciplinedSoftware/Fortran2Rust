@@ -42,7 +42,6 @@ def compact_rust_for_llm(code: str) -> tuple[str, str]:
 
     compact_lines: list[str] = []
     in_block_comment = False
-    previous_blank = False
     for line in lines[body_start:]:
         stripped = line.strip()
         if in_block_comment:
@@ -56,12 +55,8 @@ def compact_rust_for_llm(code: str) -> tuple[str, str]:
         if stripped.startswith(("//", "///", "//!")):
             continue
         if not stripped:
-            if compact_lines and not previous_blank:
-                compact_lines.append("")
-            previous_blank = True
             continue
         compact_lines.append(line.rstrip())
-        previous_blank = False
 
     return "\n".join(compact_lines).strip(), "\n".join(preserved_prefix).strip()
 
