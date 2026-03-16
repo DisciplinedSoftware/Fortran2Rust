@@ -24,7 +24,7 @@ def main():
         description="Convert Fortran code to safe, idiomatic Rust",
     )
     parser.add_argument(
-        "--non-interactive",
+        "-i", "--non-interactive",
         action="store_true",
         help="Skip all menus; auto-convert dgemm from BLAS using .env config",
     )
