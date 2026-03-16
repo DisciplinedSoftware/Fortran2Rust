@@ -177,6 +177,18 @@ def _evaluate_stage_ok(stage_num: int, stage_result: dict) -> tuple[bool, str]:
       ]
       if compile_flags and not any(compile_flags):
         notes.append("Fortran baselines did not compile")
+      run_failures = [
+        fn for fn, info in benchmarks.items()
+        if isinstance(info, dict) and info.get("compile_ok") and not bool(info.get("run_ok", False))
+      ]
+      if run_failures:
+        notes.append("Fortran baseline run failures")
+      missing_outputs = [
+        fn for fn, info in benchmarks.items()
+        if isinstance(info, dict) and info.get("compile_ok") and info.get("run_ok") and not bool(info.get("output_ok", False))
+      ]
+      if missing_outputs:
+        notes.append("Fortran baseline outputs missing")
 
   if stage_num == 4:
     bench_results = stage_result.get("bench_results")

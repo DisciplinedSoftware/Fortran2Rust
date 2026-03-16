@@ -351,9 +351,79 @@ def _is_non_repairable_bench_error(error: str) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset_dir: Path) -> tuple[bool, str, Path | None, float | None]:
-    """Compile and run a C benchmark driver. Returns (ok, error, output_bin_path, c_time_ms)."""
+_C_DEF_RE = re.compile(
+    r"^\s*(?:/\*[^*]*\*/\s*)?(?:void|int|char|double|float|long|short|signed|unsigned|logical|doublereal|real)\s+([a-z][a-z0-9_]*)\s*\(",
+    flags=re.IGNORECASE,
+)
+
+
+def _defined_c_symbols(c_file: Path) -> set[str]:
+    symbols: set[str] = set()
+    for line in c_file.read_text(errors="replace").splitlines():
+        m = _C_DEF_RE.match(line)
+        if not m:
+            continue
+        sym = m.group(1).upper()
+        if sym.endswith("_"):
+            sym = sym[:-1]
+        symbols.add(sym)
+    return symbols
+
+
+def _collect_bench_closure_symbols(fn_name: str, call_graph: dict | None) -> set[str]:
+    root = fn_name.upper()
+    graph = {str(k).upper(): [str(c).upper() for c in (v or [])] for k, v in (call_graph or {}).items()}
+    required = {root}
+    queue = [root]
+    while queue:
+        sym = queue.pop(0)
+        for callee in graph.get(sym, []):
+            if callee not in required:
+                required.add(callee)
+                queue.append(callee)
+    return required
+
+
+def _select_bench_lib_c_files(c_dir: Path, fn_name: str, call_graph: dict | None) -> list[Path]:
     c_lib_files = [f for f in sorted(c_dir.glob("*.c")) if "bench_" not in f.name]
+    if not c_lib_files:
+        return []
+
+    symbol_to_files: dict[str, list[Path]] = {}
+    for c_file in c_lib_files:
+        for sym in _defined_c_symbols(c_file):
+            symbol_to_files.setdefault(sym, []).append(c_file)
+
+    required_symbols = _collect_bench_closure_symbols(fn_name, call_graph)
+    selected: list[Path] = []
+    seen: set[Path] = set()
+    for sym in required_symbols:
+        for c_file in symbol_to_files.get(sym, []):
+            if c_file not in seen:
+                seen.add(c_file)
+                selected.append(c_file)
+
+    if not selected:
+        fallback = c_dir / f"{fn_name.lower()}.c"
+        if fallback.exists():
+            selected = [fallback]
+
+    if not selected:
+        selected = c_lib_files
+
+    return selected
+
+
+def _compile_and_run_bench(
+    c_dir: Path,
+    bench_c: Path,
+    output_dir: Path,
+    dataset_dir: Path,
+    call_graph: dict | None = None,
+) -> tuple[bool, str, Path | None, float | None]:
+    """Compile and run a C benchmark driver. Returns (ok, error, output_bin_path, c_time_ms)."""
+    fn_name = re.sub(r"^bench_", "", bench_c.stem)
+    c_lib_files = _select_bench_lib_c_files(c_dir, fn_name, call_graph)
     exe = output_dir / bench_c.stem  # e.g. bench_dgemm (not bench_c_bench_dgemm)
     cmd = (
         ["gcc", "-O2", f"-I{c_dir}", str(bench_c)]
@@ -396,10 +466,27 @@ def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset
     if m:
         c_time_ms = float(m.group(1))
 
-    fn_name = re.sub(r"^bench_", "", bench_c.stem)
     # The bench driver writes bench_{fn_name}_output.bin to cwd (output_dir)
     c_bin = output_dir / f"bench_{fn_name}_output.bin"
     return True, "", c_bin if c_bin.exists() else None, c_time_ms
+
+
+def _write_compile_commands(output_dir: Path) -> Path:
+    """Write compile_commands.json for non-benchmark C sources and return its path."""
+    lib_c_files = [
+        f.resolve() for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")
+    ]
+    compile_commands = [
+        {
+            "file": str(f),
+            "directory": str(output_dir.resolve()),
+            "command": f"gcc -O2 -I{output_dir.resolve()} -c {f}",
+        }
+        for f in lib_c_files
+    ]
+    cc_path = output_dir / "compile_commands.json"
+    cc_path.write_text(json.dumps(compile_commands, indent=2))
+    return cc_path
 
 
 _C_CODE_LINE_RE = re.compile(
@@ -931,6 +1018,11 @@ def fix_c_code(
         status_fn("C compilation successful")
     log.info("C compilation successful")
 
+    # Write compile_commands.json as soon as C compiles, so Stage 5 can proceed
+    # even if benchmark validation later fails.
+    cc_path = _write_compile_commands(output_dir)
+    log.info("Wrote compile_commands.json")
+
     # ── Benchmark loop ────────────────────────────────────────────────────────
     bench_ok = False
     bench_results: dict = {}
@@ -949,7 +1041,13 @@ def fix_c_code(
                 if status_fn:
                     status_fn(f"Running C benchmark: {bench_c.stem}…")
                 log.info(f"Running C benchmark: {bench_c.stem}")
-                ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
+                ok, err, c_bin, c_time_ms = _compile_and_run_bench(
+                    output_dir,
+                    bench_c,
+                    output_dir,
+                    baseline_dir,
+                    call_graph=call_graph,
+                )
                 skip_fn_llm_repairs = False
                 bench_succeeded = False
                 for b_attempt in range(max_retries):
@@ -1001,12 +1099,21 @@ def fix_c_code(
                     _repair_file(llm, bench_c, filter_errors_for_file(err, bench_c.name), attempt=b_attempt)
                     llm_turns += 1
                     total_retries += 1
-                    ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
-                if skip_fn_llm_repairs:
-                    raise MaxRetriesExceededError(
-                        "Stage 4 (benchmark)",
-                        BenchmarkRuntimeError(fn_name, err),
+                    ok, err, c_bin, c_time_ms = _compile_and_run_bench(
+                        output_dir,
+                        bench_c,
+                        output_dir,
+                        baseline_dir,
+                        call_graph=call_graph,
                     )
+                if skip_fn_llm_repairs:
+                    bench_results[fn_name] = {
+                        "pass": False,
+                        "max_abs_diff": None,
+                        "c_time_ms": None,
+                        "reason": "non-repairable link/dependency error",
+                    }
+                    continue
                 if not bench_succeeded:
                     all_passed = False
                     # Report what went wrong on final failure
@@ -1017,7 +1124,13 @@ def fix_c_code(
                         exc = BenchmarkRuntimeError(fn_name, err)
                     else:
                         exc = BenchmarkRuntimeError(fn_name, "unknown failure")
-                    raise MaxRetriesExceededError("Stage 4 (benchmark)", exc)
+                    bench_results[fn_name] = {
+                        "pass": False,
+                        "max_abs_diff": last.get("max_abs_diff"),
+                        "c_time_ms": last.get("c_time_ms"),
+                        "reason": str(exc),
+                    }
+                    log.warning(f"  {fn_name}: benchmark validation failed after retries: {exc}")
             bench_ok = all_passed
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
@@ -1025,24 +1138,9 @@ def fix_c_code(
         json.dumps(llm.pop_conversation_log(), indent=2)
     )
 
-    # Generate compile_commands.json with absolute paths for c2rust (Stage 5).
-    # Include library .c files only. Benchmark drivers are generated/maintained
-    # separately and can contain harness-specific code that is not suitable for
-    # c2rust transpilation.
-    lib_c_files = [
-        f.resolve() for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")
-    ]
-    compile_commands = [
-        {
-            "file": str(f),
-            "directory": str(output_dir.resolve()),
-            "command": f"gcc -O2 -I{output_dir.resolve()} -c {f}",
-        }
-        for f in lib_c_files
-    ]
-    cc_path = output_dir / "compile_commands.json"
-    cc_path.write_text(json.dumps(compile_commands, indent=2))
-    log.info(f"Wrote compile_commands.json with {len(lib_c_files)} entries")
+    # Refresh compile_commands after potential benchmark-file LLM edits.
+    cc_path = _write_compile_commands(output_dir)
+    log.info("Wrote compile_commands.json")
 
     result = {
         "compile_ok": compile_ok,

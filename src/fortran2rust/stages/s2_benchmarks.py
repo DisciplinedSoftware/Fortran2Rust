@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..exceptions import BenchmarkRuntimeError, CompilationError
 from ._log import make_stage_logger
 
 N_DEFAULT = 500  # matrix size giving ~1ms per DGEMM call
@@ -96,7 +97,11 @@ def _parse_fn_signature(fn_name: str, source_dir: Path) -> dict | None:
     fn_upper = fn_name.upper()
     parser = ParserFactory().create(std="f2003")
 
-    for f in sorted(source_dir.glob("*.f")):
+    fortran_sources = sorted(
+        [p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in {".f", ".f90"}]
+    )
+
+    for f in fortran_sources:
         try:
             reader = FortranFileReader(str(f), ignore_comments=True)
             with warnings.catch_warnings():
@@ -141,6 +146,17 @@ def _parse_fn_signature(fn_name: str, source_dir: Path) -> dict | None:
                         is_array = m.group(2) is not None
                         type_map[vname] = {"type": raw_type, "is_array": is_array}
 
+            return_type = None
+            if is_function:
+                raw_ret = re.sub(r"\s+", " ", str(stmt.items[0]).upper().strip())
+                if raw_ret and raw_ret != "NONE":
+                    return_type = raw_ret
+
+            if is_function and return_type is None:
+                fn_decl = type_map.get(fn_upper)
+                if fn_decl and fn_decl.get("type"):
+                    return_type = fn_decl["type"]
+
             params = [
                 {
                     "name": pname,
@@ -149,7 +165,11 @@ def _parse_fn_signature(fn_name: str, source_dir: Path) -> dict | None:
                 }
                 for pname in param_names
             ]
-            return {"is_function": is_function, "params": params}
+            return {
+                "is_function": is_function,
+                "params": params,
+                "return_type": return_type,
+            }
 
     return None
 
@@ -174,6 +194,8 @@ KNOWN_BLAS = {
     "DSYMM", "SSYMM", "DSYRK", "SSYRK",
     "DSYR2K", "SSYR2K", "DTRMV", "STRMV",
 }
+
+KNOWN_GEMM = {"DGEMM", "SGEMM", "ZGEMM", "CGEMM"}
 
 
 def generate_precision_dataset(fn_name: str, N: int, output_dir: Path,
@@ -254,18 +276,18 @@ def _make_dgemm_driver(fn_name: str, N: int, prec: _Precision) -> str:
       INTEGER :: I, J
 
       ! Load shared dataset (raw binary, column-major)
-      OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='OLD')
+            OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED',
+        $     ACCESS='STREAM', STATUS='OLD')
       READ(10) A
       CLOSE(10)
 
-      OPEN(11, FILE='dataset_{fn_lo}_B.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='OLD')
+            OPEN(11, FILE='dataset_{fn_lo}_B.bin', FORM='UNFORMATTED',
+        $     ACCESS='STREAM', STATUS='OLD')
       READ(11) B
       CLOSE(11)
 
-      OPEN(12, FILE='dataset_{fn_lo}_params.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='OLD')
+            OPEN(12, FILE='dataset_{fn_lo}_params.bin', FORM='UNFORMATTED',
+        $     ACCESS='STREAM', STATUS='OLD')
       READ(12) ALPHA
       READ(12) BETA
       CLOSE(12)
@@ -286,8 +308,8 @@ def _make_dgemm_driver(fn_name: str, N: int, prec: _Precision) -> str:
       ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
 
       ! Write output (column-major raw binary for numpy comparison)
-      OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='REPLACE')
+            OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED',
+        $     ACCESS='STREAM', STATUS='REPLACE')
       WRITE(13) C
       CLOSE(13)
 
@@ -315,12 +337,12 @@ def _make_dgemm_precision_driver(fn_name: str, N: int, prec: _Precision) -> str:
       BETA = {zero}
 
       ! Load shared near-cancellation dataset (same data used by C and Rust)
-      OPEN(10, FILE='dataset_{fn_lo}_precision_A.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='OLD')
+            OPEN(10, FILE='dataset_{fn_lo}_precision_A.bin', FORM='UNFORMATTED',
+        $     ACCESS='STREAM', STATUS='OLD')
       READ(10) A
       CLOSE(10)
-      OPEN(11, FILE='dataset_{fn_lo}_precision_B.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='OLD')
+            OPEN(11, FILE='dataset_{fn_lo}_precision_B.bin', FORM='UNFORMATTED',
+        $     ACCESS='STREAM', STATUS='OLD')
       READ(11) B
       CLOSE(11)
 
@@ -340,6 +362,85 @@ def _make_dgemm_precision_driver(fn_name: str, N: int, prec: _Precision) -> str:
 
       WRITE(*,*) 'PRECISION_TEST_DONE'
       END PROGRAM
+"""
+
+
+def _make_axpy_driver(fn_name: str, N: int, prec: _Precision) -> str:
+    fn_up = fn_name.upper()
+    fn_lo = fn_name.lower()
+    ftype = prec.fortran_type
+    return f"""\
+PROGRAM BENCH_{fn_up}
+IMPLICIT NONE
+INTEGER, PARAMETER :: N = {N}
+{ftype} :: X(N), Y(N), ALPHA
+INTEGER :: INCX, INCY
+INTEGER :: ITER, COUNT_RATE, T1, T2
+DOUBLE PRECISION :: ELAPSED
+
+OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
+READ(10) X
+CLOSE(10)
+
+OPEN(11, FILE='dataset_{fn_lo}_B.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
+READ(11) Y
+CLOSE(11)
+
+OPEN(12, FILE='dataset_{fn_lo}_params.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
+READ(12) ALPHA
+CLOSE(12)
+
+INCX = 1
+INCY = 1
+
+CALL SYSTEM_CLOCK(COUNT_RATE=COUNT_RATE)
+CALL SYSTEM_CLOCK(T1)
+DO ITER = 1, 10
+    CALL {fn_up}(N, ALPHA, X, INCX, Y, INCY)
+END DO
+CALL SYSTEM_CLOCK(T2)
+ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
+
+OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
+WRITE(13) Y
+CLOSE(13)
+
+WRITE(*,'(A,F12.4)') 'FORTRAN_TIME_MS=', ELAPSED
+END PROGRAM
+"""
+
+
+def _make_axpy_precision_driver(fn_name: str, N: int, prec: _Precision) -> str:
+    fn_up = fn_name.upper()
+    fn_lo = fn_name.lower()
+    ftype = prec.fortran_type
+    one = prec.fortran_one
+    return f"""\
+PROGRAM BENCH_{fn_up}_PREC
+IMPLICIT NONE
+INTEGER, PARAMETER :: N = {N}
+{ftype} :: X(N), Y(N), ALPHA
+INTEGER :: INCX, INCY
+
+OPEN(10, FILE='dataset_{fn_lo}_precision_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
+READ(10) X
+CLOSE(10)
+
+OPEN(11, FILE='dataset_{fn_lo}_precision_B.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
+READ(11) Y
+CLOSE(11)
+
+ALPHA = {one}
+INCX = 1
+INCY = 1
+CALL {fn_up}(N, ALPHA, X, INCX, Y, INCY)
+
+OPEN(13, FILE='bench_{fn_lo}_precision_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
+WRITE(13) Y
+CLOSE(13)
+
+WRITE(*,*) 'PRECISION_TEST_DONE'
+END PROGRAM
 """
 
 
@@ -437,6 +538,11 @@ def _make_generic_driver(fn_name: str, N: int,
                 inits.append(f"      {bvar} = N")
             call_args.append(bvar)
 
+        elif "LOGICAL" in ptype:
+            decls.append(f"      LOGICAL :: {bvar}")
+            inits.append(f"      {bvar} = .TRUE.")
+            call_args.append(bvar)
+
         elif p_prec is not None:
             if p["is_array"]:
                 decls.append(f"      {ptype} :: {bvar}(N,N)")
@@ -466,17 +572,23 @@ def _make_generic_driver(fn_name: str, N: int,
 
     # Result variable for FUNCTIONs
     result_decl = ""
+    func_decl = ""
     call_stmt   = ""
     if is_fn:
-        ret_prec  = prec
+        ret_prec = _FORTRAN_TYPE_TO_PREC.get(str(sig.get("return_type", "")).upper(), prec)
         result_decl = f"      {ret_prec.fortran_type} :: BENCH_RESULT\n"
+        func_decl = f"      {ret_prec.fortran_type} :: {fn_up}\n      EXTERNAL {fn_up}\n"
         call_stmt   = f"BENCH_RESULT = {fn_up}({', '.join(call_args)})"
         out_var     = "BENCH_RESULT"
     else:
         call_stmt = f"CALL {fn_up}({', '.join(call_args)})"
         # Write the last float array as output, or first if none
         float_arrays = [p for p in params if p["is_array"] and p["type"] in _FORTRAN_TYPE_TO_PREC]
-        out_var = f"BENCH_{float_arrays[-1]['name']}" if float_arrays else None
+        if float_arrays:
+            out_var = f"BENCH_{float_arrays[-1]['name']}"
+        else:
+            float_scalars = [p for p in params if (not p["is_array"]) and p["type"] in _FORTRAN_TYPE_TO_PREC]
+            out_var = f"BENCH_{float_scalars[-1]['name']}" if float_scalars else None
 
     decl_block      = "\n".join(decls)
     init_block      = "\n".join(inits)
@@ -495,7 +607,7 @@ def _make_generic_driver(fn_name: str, N: int,
       PROGRAM BENCH_{fn_up}
       IMPLICIT NONE
       INTEGER, PARAMETER :: N = {N}
-{result_decl}{decl_block}
+{result_decl}{func_decl}{decl_block}
       INTEGER :: ITER, COUNT_RATE, T1, T2
       DOUBLE PRECISION :: ELAPSED
 
@@ -649,6 +761,109 @@ int main(void) {{
     FILE *out = fopen("bench_{fn_lo}_precision_output.bin", "wb");
     if (!out) {{ perror("bench_{fn_lo}_precision_output.bin"); exit(1); }}
     fwrite(prec_C, sizeof({ct}), (size_t)BENCH_N * BENCH_N, out);
+    fclose(out);
+
+    printf("C_PRECISION_DONE\\n");
+    return 0;
+}}
+"""
+
+
+def _make_c_axpy_driver(fn_name: str, N: int, prec: _Precision) -> str:
+    fn_lo = fn_name.lower()
+    fn_ext = fn_lo + "_"
+    ct = prec.c_type
+    return f"""\
+/* C benchmark driver for {fn_name} (AXPY) — generated by Fortran2Rust */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include "f2c.h"
+
+#define BENCH_N {N}
+
+extern int {fn_ext}(integer *n, {ct} *da, {ct} *dx, integer *incx, {ct} *dy, integer *incy);
+
+static {ct} bench_X[BENCH_N];
+static {ct} bench_Y[BENCH_N];
+
+static void read_bin(const char *path, {ct} *buf, size_t count) {{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {{ perror(path); exit(1); }}
+    if (fread(buf, sizeof({ct}), count, fp) != count) {{
+        fprintf(stderr, "Short read: %s\\n", path); exit(1);
+    }}
+    fclose(fp);
+}}
+
+int main(void) {{
+    {ct} params[2];
+    read_bin("dataset_{fn_lo}_A.bin", bench_X, BENCH_N);
+    read_bin("dataset_{fn_lo}_B.bin", bench_Y, BENCH_N);
+    read_bin("dataset_{fn_lo}_params.bin", params, 2);
+
+    {ct} alpha = params[0];
+    integer n = BENCH_N, incx = 1, incy = 1;
+
+    struct timespec t1, t2;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    for (int iter = 0; iter < 10; iter++) {{
+        {fn_ext}(&n, &alpha, bench_X, &incx, bench_Y, &incy);
+    }}
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    double elapsed_ms = ((t2.tv_sec - t1.tv_sec) * 1e9 + (t2.tv_nsec - t1.tv_nsec)) / 1e6 / 10.0;
+
+    FILE *out = fopen("bench_{fn_lo}_output.bin", "wb");
+    if (!out) {{ perror("bench_{fn_lo}_output.bin"); exit(1); }}
+    fwrite(bench_Y, sizeof({ct}), BENCH_N, out);
+    fclose(out);
+
+    printf("C_TIME_MS=%.4f\\n", elapsed_ms);
+    return 0;
+}}
+"""
+
+
+def _make_c_axpy_precision_driver(fn_name: str, N: int, prec: _Precision) -> str:
+    fn_lo = fn_name.lower()
+    fn_ext = fn_lo + "_"
+    ct = prec.c_type
+    return f"""\
+/* C precision benchmark driver for {fn_name} (AXPY) — generated by Fortran2Rust */
+#include <stdio.h>
+#include <stdlib.h>
+#include "f2c.h"
+
+#define BENCH_N {N}
+
+extern int {fn_ext}(integer *n, {ct} *da, {ct} *dx, integer *incx, {ct} *dy, integer *incy);
+
+static {ct} prec_X[BENCH_N];
+static {ct} prec_Y[BENCH_N];
+
+static void read_bin(const char *path, {ct} *buf, size_t count) {{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {{ perror(path); exit(1); }}
+    if (fread(buf, sizeof({ct}), count, fp) != count) {{
+        fprintf(stderr, "Short read: %s\\n", path); exit(1);
+    }}
+    fclose(fp);
+}}
+
+int main(void) {{
+    read_bin("dataset_{fn_lo}_precision_A.bin", prec_X, BENCH_N);
+    read_bin("dataset_{fn_lo}_precision_B.bin", prec_Y, BENCH_N);
+
+    {ct} alpha;
+    memset(&alpha, 0, sizeof(alpha));
+    *((double *)&alpha) = 1.0;
+    integer n = BENCH_N, incx = 1, incy = 1;
+    {fn_ext}(&n, &alpha, prec_X, &incx, prec_Y, &incy);
+
+    FILE *out = fopen("bench_{fn_lo}_precision_output.bin", "wb");
+    if (!out) {{ perror("bench_{fn_lo}_precision_output.bin"); exit(1); }}
+    fwrite(prec_Y, sizeof({ct}), BENCH_N, out);
     fclose(out);
 
     printf("C_PRECISION_DONE\\n");
@@ -858,6 +1073,128 @@ fn main() {{
 """
 
 
+def _make_rust_axpy_driver(fn_name: str, N: int, prec: _Precision) -> str:
+    fn_lo = fn_name.lower()
+    fn_ext = fn_lo + "_"
+    rtype = _precision_to_rust_type(prec)
+    stubs = _RUST_F2C_STUBS
+    return f"""\
+/* Auto-generated Rust benchmark for {fn_name} (AXPY) — do NOT edit */
+#![allow(non_snake_case, non_upper_case_globals, dead_code, static_mut_refs)]
+use std::fs::File;
+use std::io::{{Read, Write}};
+use std::time::Instant;
+
+{stubs}
+use fortran2rust_output::{fn_lo}::{fn_ext};
+
+const BENCH_N: usize = {N};
+static mut BENCH_X: [{rtype}; BENCH_N] = [0.0; BENCH_N];
+static mut BENCH_Y: [{rtype}; BENCH_N] = [0.0; BENCH_N];
+
+fn read_data(path: &str, buf: &mut [{rtype}]) {{
+    let mut f = File::open(path).unwrap_or_else(|e| {{
+        eprintln!("{{}}: {{}}", path, e); std::process::exit(1);
+    }});
+    let nb = buf.len() * std::mem::size_of::<{rtype}>();
+    let mut raw = vec![0u8; nb];
+    f.read_exact(&mut raw).unwrap_or_else(|_| {{
+        eprintln!("Short read: {{}}", path); std::process::exit(1);
+    }});
+    for (dst, chunk) in buf.iter_mut().zip(raw.chunks_exact(std::mem::size_of::<{rtype}>())) {{
+        *dst = {rtype}::from_ne_bytes(chunk.try_into().unwrap());
+    }}
+}}
+
+fn main() {{
+    unsafe {{
+        read_data("dataset_{fn_lo}_A.bin", &mut BENCH_X);
+        read_data("dataset_{fn_lo}_B.bin", &mut BENCH_Y);
+        let mut params: [{rtype}; 2] = [0.0; 2];
+        read_data("dataset_{fn_lo}_params.bin", &mut params);
+        let mut alpha = params[0];
+
+        let mut n: i32 = BENCH_N as i32;
+        let mut incx: i32 = 1;
+        let mut incy: i32 = 1;
+
+        let start = Instant::now();
+        for _ in 0..10 {{
+            {fn_ext}(&mut n, &mut alpha, BENCH_X.as_mut_ptr(), &mut incx, BENCH_Y.as_mut_ptr(), &mut incy);
+        }}
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0 / 10.0;
+
+        let out_bytes: &[u8] = std::slice::from_raw_parts(
+            BENCH_Y.as_ptr() as *const u8,
+            BENCH_N * std::mem::size_of::<{rtype}>(),
+        );
+        File::create("bench_{fn_lo}_output.bin")
+            .and_then(|mut f| f.write_all(out_bytes))
+            .expect("failed to write bench_{fn_lo}_output.bin");
+
+        println!("RUST_TIME_MS={{:.4}}", elapsed_ms);
+    }}
+}}
+"""
+
+
+def _make_rust_axpy_precision_driver(fn_name: str, N: int, prec: _Precision) -> str:
+    fn_lo = fn_name.lower()
+    fn_ext = fn_lo + "_"
+    rtype = _precision_to_rust_type(prec)
+    stubs = _RUST_F2C_STUBS
+    return f"""\
+/* Auto-generated Rust precision benchmark for {fn_name} (AXPY) — do NOT edit */
+#![allow(non_snake_case, non_upper_case_globals, dead_code, static_mut_refs)]
+use std::fs::File;
+use std::io::{{Read, Write}};
+
+{stubs}
+use fortran2rust_output::{fn_lo}::{fn_ext};
+
+const BENCH_N: usize = {N};
+static mut PREC_X: [{rtype}; BENCH_N] = [0.0; BENCH_N];
+static mut PREC_Y: [{rtype}; BENCH_N] = [0.0; BENCH_N];
+
+fn read_data(path: &str, buf: &mut [{rtype}]) {{
+    let mut f = File::open(path).unwrap_or_else(|e| {{
+        eprintln!("{{}}: {{}}", path, e); std::process::exit(1);
+    }});
+    let nb = buf.len() * std::mem::size_of::<{rtype}>();
+    let mut raw = vec![0u8; nb];
+    f.read_exact(&mut raw).unwrap_or_else(|_| {{
+        eprintln!("Short read: {{}}", path); std::process::exit(1);
+    }});
+    for (dst, chunk) in buf.iter_mut().zip(raw.chunks_exact(std::mem::size_of::<{rtype}>())) {{
+        *dst = {rtype}::from_ne_bytes(chunk.try_into().unwrap());
+    }}
+}}
+
+fn main() {{
+    unsafe {{
+        read_data("dataset_{fn_lo}_precision_A.bin", &mut PREC_X);
+        read_data("dataset_{fn_lo}_precision_B.bin", &mut PREC_Y);
+        let mut alpha: {rtype} = 1.0;
+        let mut n: i32 = BENCH_N as i32;
+        let mut incx: i32 = 1;
+        let mut incy: i32 = 1;
+
+        {fn_ext}(&mut n, &mut alpha, PREC_X.as_mut_ptr(), &mut incx, PREC_Y.as_mut_ptr(), &mut incy);
+
+        let out_bytes: &[u8] = std::slice::from_raw_parts(
+            PREC_Y.as_ptr() as *const u8,
+            BENCH_N * std::mem::size_of::<{rtype}>(),
+        );
+        File::create("bench_{fn_lo}_precision_output.bin")
+            .and_then(|mut f| f.write_all(out_bytes))
+            .expect("failed to write bench_{fn_lo}_precision_output.bin");
+
+        println!("RUST_PRECISION_DONE");
+    }}
+}}
+"""
+
+
 def _make_c_generic_driver(fn_name: str, N: int,
                            sig: dict | None, prec: _Precision) -> str:
     """
@@ -877,6 +1214,7 @@ def _make_c_generic_driver(fn_name: str, N: int,
         inits:      list[str] = []
         reads:      list[str] = []
         call_args:  list[str] = []
+        scalar_outputs: list[tuple[str, str]] = []
         arr_idx = 0
 
         for p in params:
@@ -914,11 +1252,11 @@ def _make_c_generic_driver(fn_name: str, N: int,
                     call_args.append(cname)
                 else:
                     pu = pname.upper()
-                    val = p_prec.fortran_one.replace("D0", "").replace("0D0", "0").replace("E0", "")
                     decls.append(f"    {pctype} {cname};")
                     inits.append(f"    memset(&{cname}, 0, sizeof({cname}));")
                     if pu in ("ALPHA", "SCALE", "DA", "SA", "ZA", "CA", "A", "W"):
                         inits.append(f"    *((double *)&{cname}) = 1.0;  /* alpha = 1 */")
+                    scalar_outputs.append((cname, pctype))
                     call_args.append(f"&{cname}")
             else:
                 decls.append(f"    /* TODO: {ptype} {cname}; */")
@@ -927,7 +1265,7 @@ def _make_c_generic_driver(fn_name: str, N: int,
         # Append ftnlen=1 for each CHARACTER parameter
         ftnlen_args = ["1"] * len(char_params)
         all_args = call_args + ftnlen_args
-        call_line = f"    /* {fn_ext}({', '.join(all_args)}); */"
+        call_line = f"    {fn_ext}({', '.join(all_args)});"
 
         # Determine output array (last float array in params)
         float_arrays = [
@@ -935,8 +1273,18 @@ def _make_c_generic_driver(fn_name: str, N: int,
             for p in params
             if p["is_array"] and p["type"] in _FORTRAN_TYPE_TO_PREC
         ]
-        out_arr   = f"bench_{float_arrays[-1]}" if float_arrays else "bench_a"
-        out_ctype = ct
+        if float_arrays:
+            out_arr_expr = f"bench_{float_arrays[-1]}"
+            out_ctype = ct
+            out_count = "(size_t)BENCH_N * BENCH_N"
+        elif scalar_outputs:
+            out_arr_expr = f"&{scalar_outputs[-1][0]}"
+            out_ctype = scalar_outputs[-1][1]
+            out_count = "1"
+        else:
+            out_arr_expr = "bench_A"
+            out_ctype = ct
+            out_count = "(size_t)BENCH_N * BENCH_N"
 
         decl_block = "\n".join(decls)
         init_block = "\n".join(inits)
@@ -953,8 +1301,9 @@ def _make_c_generic_driver(fn_name: str, N: int,
             f'    read_bin("dataset_{fn_lo}_B.bin", bench_B, (size_t)BENCH_N * BENCH_N);'
         )
         call_line   = f"    /* TODO: {fn_ext}(...); */"
-        out_arr     = "bench_C"
+        out_arr_expr = "bench_C"
         out_ctype   = ct
+        out_count   = "(size_t)BENCH_N * BENCH_N"
 
     return f"""\
 /* C benchmark driver for {fn_name} — generated by Fortran2Rust */
@@ -989,7 +1338,7 @@ int main(void) {{
 
     FILE *out = fopen("bench_{fn_lo}_output.bin", "wb");
     if (!out) {{ perror("bench_{fn_lo}_output.bin"); exit(1); }}
-    fwrite({out_arr}, sizeof({out_ctype}), (size_t)BENCH_N * BENCH_N, out);
+    fwrite({out_arr_expr}, sizeof({out_ctype}), {out_count}, out);
     fclose(out);
 
     printf("C_TIME_MS=%.4f\\n", elapsed_ms);
@@ -1003,6 +1352,7 @@ def generate_benchmarks(
     entry_points: list[str],
     dep_files: list[Path],
     output_dir: Path,
+    call_graph: dict[str, list[str]] | None = None,
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1062,18 +1412,28 @@ def generate_benchmarks(
         sig  = ep_sig[ep]
         dataset_paths = {k: Path(v) for k, v in all_datasets[ep].items()}
 
-        if ep_upper in KNOWN_BLAS:
+        driver_ext = ".f"
+        precision_ext = ".f"
+
+        if ep_upper in KNOWN_GEMM:
             driver_src      = _make_dgemm_driver(ep, N, prec)
             precision_src   = _make_dgemm_precision_driver(ep, N, prec)
             c_driver_src    = _make_c_blas_driver(ep, N, prec)
             c_precision_src = _make_c_blas_precision_driver(ep, N, prec)
+        elif ep_upper.endswith("AXPY") and not prec.is_complex:
+            driver_src      = _make_axpy_driver(ep, N, prec)
+            precision_src   = _make_axpy_precision_driver(ep, N, prec)
+            c_driver_src    = _make_c_axpy_driver(ep, N, prec)
+            c_precision_src = _make_c_axpy_precision_driver(ep, N, prec)
+            driver_ext = ".f90"
+            precision_ext = ".f90"
         else:
             driver_src      = _make_generic_driver(ep, N, sig, prec)
             precision_src   = None
             c_driver_src    = _make_c_generic_driver(ep, N, sig, prec)
             c_precision_src = None
 
-        driver_file = output_dir / f"bench_{ep_lower}.f"
+        driver_file = output_dir / f"bench_{ep_lower}{driver_ext}"
         driver_file.write_text(driver_src)
         bench_files.append(str(driver_file))
 
@@ -1088,7 +1448,7 @@ def generate_benchmarks(
             bench_c_files.append(str(c_prec_file))
 
         if precision_src:
-            prec_file = output_dir / f"bench_{ep_lower}_precision.f"
+            prec_file = output_dir / f"bench_{ep_lower}_precision{precision_ext}"
             prec_file.write_text(precision_src)
             bench_files.append(str(prec_file))
 
@@ -1097,7 +1457,7 @@ def generate_benchmarks(
         # because c2rust bench files reference f2c I/O symbols (s_wsfe, do_fio, …)
         # that are undefined at binary link time.  The generated files include
         # no-op stubs for those symbols so the bench binary links cleanly.
-        if ep_upper in KNOWN_BLAS and not prec.is_complex:
+        if ep_upper in KNOWN_GEMM and not prec.is_complex:
             rs_file = output_dir / f"bench_{ep_lower}.rs"
             rs_file.write_text(_make_rust_blas_driver(ep, N, prec))
             bench_rs_files.append(str(rs_file))
@@ -1107,15 +1467,39 @@ def generate_benchmarks(
             rs_prec_file.write_text(_make_rust_blas_precision_driver(ep, N, prec))
             bench_rs_files.append(str(rs_prec_file))
             log.info(f"  Wrote Rust precision bench driver: {rs_prec_file.name}")
+        elif ep_upper.endswith("AXPY") and not prec.is_complex:
+            rs_file = output_dir / f"bench_{ep_lower}.rs"
+            rs_file.write_text(_make_rust_axpy_driver(ep, N, prec))
+            bench_rs_files.append(str(rs_file))
+            log.info(f"  Wrote Rust bench driver: {rs_file.name}")
+
+            rs_prec_file = output_dir / f"bench_{ep_lower}_precision.rs"
+            rs_prec_file.write_text(_make_rust_axpy_precision_driver(ep, N, prec))
+            bench_rs_files.append(str(rs_prec_file))
+            log.info(f"  Wrote Rust precision bench driver: {rs_prec_file.name}")
 
         # Compile and run Fortran benchmark to produce the reference output
         # Use absolute paths — relative paths fail when gfortran is not run from the repo root.
-        fortran_deps = [str(Path(f).resolve()) for f in dep_files if Path(f).exists()]
+        fortran_dep_paths: list[Path] = [Path(f).resolve() for f in dep_files if Path(f).exists()]
+        ep_upper = ep.upper()
+        extra_symbols = set((call_graph or {}).get(ep_upper, []))
+        extra_symbols.add(ep_upper)
+        for sym in extra_symbols:
+            sym_lower = sym.lower()
+            for ext in (".f", ".f90"):
+                candidate = source_dir / f"{sym_lower}{ext}"
+                if candidate.exists():
+                    fortran_dep_paths.append(candidate.resolve())
+        fortran_deps = [str(p) for p in sorted(set(fortran_dep_paths))]
         exe_path = (output_dir / f"bench_{ep_lower}").resolve()
         compile_cmd = (
-            ["gfortran", "-O2", str(driver_file.resolve())]
+            [
+                "gfortran", "-O2",
+                "-ffunction-sections", "-fdata-sections",
+                str(driver_file.resolve()),
+            ]
             + fortran_deps
-            + ["-lm", "-o", str(exe_path)]
+            + ["-Wl,--gc-sections", "-Wl,--allow-multiple-definition", "-lm", "-o", str(exe_path)]
         )
 
         bench_info: dict = {
@@ -1125,8 +1509,11 @@ def generate_benchmarks(
             "compile_ok": False,
             "compile_stdout": "",
             "compile_stderr": "",
+            "run_ok": False,
+            "run_exit_code": None,
             "run_stdout": "",
             "run_stderr": "",
+            "output_ok": False,
             "time_ms": None,
             "output_file": None,
         }
@@ -1159,6 +1546,8 @@ def generate_benchmarks(
                     capture_output=True, text=True,
                     cwd=str(output_dir.resolve()), timeout=300,
                 )
+                bench_info["run_exit_code"] = run_result.returncode
+                bench_info["run_ok"] = run_result.returncode == 0
                 bench_info["run_stdout"] = run_result.stdout
                 bench_info["run_stderr"] = run_result.stderr
                 with open(compile_log, "a") as fh:
@@ -1167,6 +1556,12 @@ def generate_benchmarks(
                         f"=== RUN STDERR ===\n{run_result.stderr}\n"
                         f"=== RUN EXIT CODE: {run_result.returncode} ===\n"
                     )
+                if run_result.returncode != 0:
+                    raise BenchmarkRuntimeError(
+                        ep,
+                        f"Fortran benchmark executable failed (exit {run_result.returncode}). "
+                        f"See {compile_log.name}",
+                    )
                 match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", run_result.stdout)
                 if match:
                     bench_info["time_ms"] = float(match.group(1))
@@ -1174,15 +1569,33 @@ def generate_benchmarks(
                 bin_file = output_dir / f"bench_{ep_lower}_output.bin"
                 if bin_file.exists():
                     bench_info["output_file"] = str(bin_file)
+                    bench_info["output_ok"] = True
+                else:
+                    raise BenchmarkRuntimeError(
+                        ep,
+                        f"Fortran benchmark did not produce output file {bin_file.name}",
+                    )
+                if not bench_info["run_ok"]:
+                    log.warning(f"  Fortran baseline run FAILED for {ep} (exit {run_result.returncode})")
+                elif not bench_info["output_ok"]:
+                    log.warning(f"  Fortran baseline for {ep} produced no output binary")
             else:
                 log.warning(f"  gfortran FAILED for {ep} (exit {result.returncode})")
                 log.warning(f"  stderr: {result.stderr[:500]}")
+                raise CompilationError(
+                    "Fortran",
+                    f"gfortran compile failed for {ep} (exit {result.returncode}). See {compile_log.name}",
+                )
         except subprocess.TimeoutExpired:
             bench_info["compile_stderr"] = "Timeout"
             log.warning(f"  gfortran timed out for {ep}")
+            raise CompilationError("Fortran", f"gfortran timed out for {ep}")
         except Exception as e:
+            if isinstance(e, (CompilationError, BenchmarkRuntimeError)):
+                raise
             bench_info["compile_stderr"] = str(e)
             log.warning(f"  gfortran exception for {ep}: {e}")
+            raise CompilationError("Fortran", f"gfortran exception for {ep}: {e}")
 
         benchmarks[ep] = bench_info
 
@@ -1190,12 +1603,18 @@ def generate_benchmarks(
         # Produces bench_{ep_lower}_precision_output.bin used as baseline in Stage 4.
         if ep_upper in KNOWN_BLAS:
             prec_driver_file = output_dir / f"bench_{ep_lower}_precision.f"
+            if not prec_driver_file.exists():
+                prec_driver_file = output_dir / f"bench_{ep_lower}_precision.f90"
             if prec_driver_file.exists():
                 prec_exe = (output_dir / f"bench_{ep_lower}_precision").resolve()
                 prec_compile_cmd = (
-                    ["gfortran", "-O2", str(prec_driver_file.resolve())]
+                    [
+                        "gfortran", "-O2",
+                        "-ffunction-sections", "-fdata-sections",
+                        str(prec_driver_file.resolve()),
+                    ]
                     + fortran_deps
-                    + ["-lm", "-o", str(prec_exe)]
+                    + ["-Wl,--gc-sections", "-Wl,--allow-multiple-definition", "-lm", "-o", str(prec_exe)]
                 )
                 prec_log = output_dir / f"gfortran_{ep_lower}_precision.log"
                 try:
