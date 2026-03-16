@@ -374,7 +374,7 @@ def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset
     return True, "", c_bin if c_bin.exists() else None, c_time_ms
 
 
-def _repair_file(llm: "LLMClient", failing_file: Path, error: str) -> None:
+def _repair_file(llm: "LLMClient", failing_file: Path, error: str, attempt: int = 0) -> None:
     """Ask LLM to fix one specific file and write it back."""
     response = llm.repair(
         context=(
@@ -383,6 +383,7 @@ def _repair_file(llm: "LLMClient", failing_file: Path, error: str) -> None:
         ),
         error=error,
         code=failing_file.read_text(),
+        attempt=attempt,
     )
     # Strip markdown fences if present
     content = re.sub(r"^```[a-z]*\n?", "", response.strip(), flags=re.MULTILINE)
@@ -486,7 +487,7 @@ def fix_c_code(
             if status_fn:
                 status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
             log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
-            _repair_file(llm, target, compile_output)
+            _repair_file(llm, target, compile_output, attempt=attempt)
 
         with ThreadPoolExecutor(max_workers=len(failing_files)) as executor:
             list(executor.map(_fix_one, failing_files))
@@ -565,7 +566,7 @@ def fix_c_code(
                     if status_fn:
                         status_fn(f"LLM: fixing numerical precision in {bench_c.name} (attempt {b_attempt+1}/{max_retries})…")
                     log.info(f"LLM bench repair attempt {b_attempt+1}/{max_retries} for {bench_c.name}")
-                    _repair_file(llm, bench_c, err)
+                    _repair_file(llm, bench_c, err, attempt=b_attempt)
                     llm_turns += 1
                     total_retries += 1
                     ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)

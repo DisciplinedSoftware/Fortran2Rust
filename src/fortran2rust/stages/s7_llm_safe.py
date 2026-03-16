@@ -170,6 +170,7 @@ def make_safe(
                     context="Fix compilation error after removing unsafe blocks in Rust code.",
                     error=build_output,
                     code=rs_file.read_text(),
+                    attempt=attempt,
                 )
 
             with ThreadPoolExecutor(max_workers=len(failing)) as executor:

@@ -125,6 +125,7 @@ def fix_rust_code(
                 ),
                 error=build_output,
                 code=code,
+                attempt=attempt,
             )
             return rs_file, response
 

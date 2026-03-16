@@ -70,8 +70,13 @@ class LLMClient(ABC):
             self._conversation_log = []
         return log
 
-    def repair(self, context: str, error: str, code: str) -> str:
-        """Standard repair prompt for fixing broken code."""
+    def repair(self, context: str, error: str, code: str, attempt: int = 0) -> str:
+        """Standard repair prompt for fixing broken code.
+
+        *attempt* is zero-indexed; when > 0 a hint is added to the prompt
+        telling the model that previous attempts failed so it should try a
+        different approach.
+        """
         system = (
             "You are an expert systems programmer. You will be given code and an error. "
             "Return ONLY the corrected complete file(s), no explanations, no markdown fences."
@@ -79,4 +84,9 @@ class LLMClient(ABC):
         # CODE first: it is the largest stable portion and benefits most from
         # prefix-based prompt caching (e.g. Anthropic's cache_control).
         user = f"CODE:\n{code}\n\nERROR:\n{error}\n\nCONTEXT:\n{context}"
+        if attempt > 0:
+            user += (
+                f"\n\nNOTE: {attempt} previous attempt(s) failed to fix this. "
+                "Try a different approach and be more thorough."
+            )
         return self.complete(system, user)
