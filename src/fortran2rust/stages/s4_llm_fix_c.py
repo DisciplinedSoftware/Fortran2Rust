@@ -169,24 +169,20 @@ def fix_c_code(
     for f in c_dir.glob("*.h"):
         shutil.copy(f, output_dir / f.name)
 
+    llm_log: list[dict] = []
+    llm_turns = 0
+    total_retries = 0
+
     # ── Pre-step: LLM-convert any .f files that f2c could not handle ─────────
     for f_file in sorted(c_dir.glob("*.f")):
         c_equiv = output_dir / f_file.with_suffix(".c").name
         if not c_equiv.exists():
-            _console.print(
-                f"  [yellow]⚠ No C output for[/yellow] [bold]{f_file.name}[/bold] "
-                f"— asking LLM to convert from Fortran…"
-            )
             if status_fn:
                 status_fn(f"LLM: converting {f_file.name} to C (f2c could not handle it)…")
             dest_f = output_dir / f_file.name
             shutil.copy(f_file, dest_f)
             _generate_c_from_fortran(llm, dest_f, output_dir)
             llm_turns += 1
-
-
-    llm_turns = 0
-    total_retries = 0
 
     # ── Compile loop: fix one failing file at a time ──────────────────────────
     if status_fn:

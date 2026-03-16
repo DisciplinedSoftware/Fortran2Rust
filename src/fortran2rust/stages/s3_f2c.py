@@ -5,6 +5,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from rich.console import Console
+
+_console = Console(stderr=True)
+
 MINIMAL_F2C_H = """\
 /* Minimal f2c.h for compilation */
 #ifndef F2C_H
@@ -93,7 +97,12 @@ def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path, statu
         if c_path.exists():
             c_files.append(str(c_path))
         else:
-                errors.append(f"f2c did not produce {c_name}: {result.stderr}")
+            _console.print(
+                f"  [yellow]⚠ No C output for[/yellow] [bold]{dest_f.name}[/bold]"
+                f" — will be converted by LLM in Stage 4: "
+                f"[dim]{result.stderr.strip().splitlines()[-1][:100] if result.stderr.strip() else 'no output'}[/dim]"
+            )
+            errors.append(f"f2c did not produce {c_name}: {result.stderr}")
 
     # Build compile_commands.json
     compile_commands = [
