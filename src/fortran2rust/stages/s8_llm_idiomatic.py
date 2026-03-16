@@ -45,7 +45,9 @@ def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
 
 
 def _apply_llm_response(response: str, target_file: Path) -> None:
-    content = re.sub(r"```[a-z]*\n?", "", response).strip()
+    content = re.sub(r"^```[a-zA-Z0-9]*\s*\n?", "", response.strip())
+    content = re.sub(r"\n?```\s*$", "", content)
+    content = content.strip()
     target_file.write_text(content + "\n")
 
 

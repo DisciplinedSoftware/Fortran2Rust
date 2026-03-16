@@ -40,12 +40,19 @@ def _apply_llm_response(response: str, output_dir: Path) -> None:
         for filename, content in zip(it, it):
             target = output_dir / filename
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content.strip() + "\n")
+            target.write_text(_strip_fences(content) + "\n")
     else:
-        content = re.sub(r"```[a-z]*\n?", "", response).strip()
+        content = _strip_fences(response)
         rs_files = sorted(output_dir.rglob("*.rs"))
         target = rs_files[0] if rs_files else output_dir / "src" / "lib.rs"
         target.write_text(content + "\n")
+
+
+def _strip_fences(content: str) -> str:
+    """Strip markdown code fences from LLM output (handles ``` ```rust, ```Rust, etc.)."""
+    content = re.sub(r"^```[a-zA-Z0-9]*\s*\n?", "", content.strip())
+    content = re.sub(r"\n?```\s*$", "", content)
+    return content.strip()
 
 
 def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
