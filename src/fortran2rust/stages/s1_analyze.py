@@ -72,8 +72,16 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
             name_to_file[name] = f
 
             calls: set[str] = set()
+            # Subroutine calls: CALL FOO(...)
             for call_node in walk(subprog, Fortran2003.Call_Stmt):
                 calls.add(str(call_node.items[0]).upper())
+            # Function calls in expressions: FOO(...) — same syntax as array access,
+            # so we collect all Part_Ref names and filter to known defined names in BFS.
+            for ref in walk(subprog, Fortran2003.Part_Ref):
+                calls.add(str(ref.items[0]).upper())
+            # Explicit Function_Reference nodes (some parsers emit these separately)
+            for ref in walk(subprog, Fortran2003.Function_Reference):
+                calls.add(str(ref.items[0]).upper())
 
             if name not in call_graph:
                 call_graph[name] = set()
