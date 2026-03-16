@@ -197,7 +197,7 @@ def run_rust_benchmarks(
         file to apply at the crate level.
       - Patches extern-type declarations to stable-Rust ``#[repr(C)]`` structs.
       - Adds a ``[[bin]]`` entry to Cargo.toml pointing directly at the file.
-      - Builds with ``cargo build --bins``
+      - Builds with ``cargo build --release --bins``
       - Copies dataset_*.bin files from baseline_dir into output_dir
       - Runs the binary from output_dir, parses C_TIME_MS / RUST_TIME_MS
       - Compares bench_{fn}_output.bin against baseline_dir/bench_{fn}_output.bin
@@ -261,9 +261,9 @@ def run_rust_benchmarks(
     # Build all bench binaries
     if status_fn:
         status_fn("Building Rust bench binaries…")
-    log.info("cargo build --bins")
+    log.info("cargo build --release --bins")
     br = subprocess.run(
-        ["cargo", "build", "--bins", "--manifest-path", str(cargo_toml)],
+        ["cargo", "build", "--release", "--bins", "--manifest-path", str(cargo_toml)],
         capture_output=True, text=True, timeout=300,
     )
     if br.returncode != 0:
@@ -286,7 +286,7 @@ def run_rust_benchmarks(
             log.info(f"  No Fortran baseline for {fn_name}, skipping")
             continue
 
-        binary = output_dir / "target" / "debug" / stem
+        binary = output_dir / "target" / "release" / stem
         if not binary.exists():
             log.warning(f"  Bench binary not found: {binary}")
             continue
@@ -296,7 +296,7 @@ def run_rust_benchmarks(
         log.info(f"Running Rust benchmark: {stem}")
 
         run = subprocess.run(
-            [str(binary)], capture_output=True, text=True,
+            [str(binary.resolve())], capture_output=True, text=True,
             cwd=str(output_dir), timeout=300,
         )
         (output_dir / f"rust_bench_{stem}.log").write_text(
