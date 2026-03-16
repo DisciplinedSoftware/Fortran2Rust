@@ -469,11 +469,13 @@ def generate_benchmarks(
             bench_files.append(str(prec_file))
 
         # Compile and run Fortran benchmark to produce the reference output
-        fortran_deps = [str(f) for f in dep_files if f.exists()]
+        # Use absolute paths — relative paths fail when gfortran is not run from the repo root.
+        fortran_deps = [str(Path(f).resolve()) for f in dep_files if Path(f).exists()]
+        exe_path = (output_dir / f"bench_{ep_lower}").resolve()
         compile_cmd = (
-            ["gfortran", "-O2", str(driver_file)]
+            ["gfortran", "-O2", str(driver_file.resolve())]
             + fortran_deps
-            + ["-lm", "-o", str(output_dir / f"bench_{ep_lower}")]
+            + ["-lm", "-o", str(exe_path)]
         )
 
         bench_info: dict = {
@@ -495,7 +497,7 @@ def generate_benchmarks(
             log.info(f"Compiling Fortran benchmark for {ep}: {' '.join(compile_cmd)}")
             result = subprocess.run(
                 compile_cmd, capture_output=True, text=True,
-                cwd=str(output_dir), timeout=120,
+                timeout=120,
             )
             bench_info["compile_stdout"] = result.stdout
             bench_info["compile_stderr"] = result.stderr
@@ -513,9 +515,9 @@ def generate_benchmarks(
                     status_fn(f"Running Fortran baseline for {ep}…")
                 log.info(f"  Running Fortran baseline for {ep}")
                 run_result = subprocess.run(
-                    [str(output_dir / f"bench_{ep_lower}")],
+                    [str(exe_path)],
                     capture_output=True, text=True,
-                    cwd=str(output_dir), timeout=300,
+                    cwd=str(output_dir.resolve()), timeout=300,
                 )
                 bench_info["run_stdout"] = run_result.stdout
                 bench_info["run_stderr"] = run_result.stderr

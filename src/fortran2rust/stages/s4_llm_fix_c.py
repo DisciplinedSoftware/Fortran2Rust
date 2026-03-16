@@ -72,7 +72,8 @@ def _get_failing_files(error: str, c_dir: Path) -> list[Path]:
 
 
 def _compile_c(c_dir: Path) -> tuple[bool, str]:
-    c_files = sorted(c_dir.glob("*.c"))
+    # Exclude bench_*.c — each has its own main() and is compiled separately
+    c_files = sorted(f for f in c_dir.glob("*.c") if not f.name.startswith("bench_"))
     if not c_files:
         return False, "No .c files found"
     result = subprocess.run(
@@ -328,9 +329,9 @@ def fix_c_code(
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
 
     # Generate compile_commands.json with absolute paths for c2rust (Stage 5).
-    # Exclude bench_*.c drivers — c2rust should only transpile the library files.
+    # Include all .c files — bench drivers are transpiled too so Rust benchmarks can be built.
     lib_c_files = [
-        f.resolve() for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")
+        f.resolve() for f in sorted(output_dir.glob("*.c"))
     ]
     compile_commands = [
         {
