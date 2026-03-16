@@ -338,22 +338,49 @@ def _compile_c(c_dir: Path) -> tuple[bool, str]:
     return all_ok, "\n".join(chunks)
 
 
-def _find_fortran_source_for_function(src_dir: Path, fn_name: str) -> str | None:
-    """Given a function name, find and extract its Fortran source from the library.
+_FORTRAN_REF_MAX_CHARS = 3000
 
-    Returns the Fortran source code if found, None otherwise.
+
+def _find_fortran_source_for_function(src_dir: Path, fn_name: str) -> str | None:
+    """Extract only the target Fortran routine as compact repair context.
+
+    Returns one subroutine/function block for *fn_name* when found.
+    The returned snippet is truncated to keep prompt size bounded.
     """
-    # Try to find .f files in the source directory
-    for f_file in src_dir.glob("*.f"):
+    candidate_files = sorted([*src_dir.glob("*.f"), *src_dir.glob("*.F")])
+    start_re = re.compile(rf"^\s*(?:\w+\s+)*(?:subroutine|function)\s+{re.escape(fn_name)}\b", re.IGNORECASE)
+    end_re = re.compile(r"^\s*end\s*(?:subroutine|function)?\b", re.IGNORECASE)
+
+    for f_file in candidate_files:
         try:
-            content = f_file.read_text(errors="ignore")
-            # Look for a subroutine or function definition with this name
-            # Case-insensitive search
-            pattern = rf"(?:subroutine|function)\s+{re.escape(fn_name)}\b"
-            if re.search(pattern, content, re.IGNORECASE):
-                return content
+            lines = f_file.read_text(errors="ignore").splitlines()
         except Exception:
-            pass
+            continue
+
+        start_idx = None
+        for idx, line in enumerate(lines):
+            if start_re.match(line):
+                start_idx = idx
+                break
+        if start_idx is None:
+            continue
+
+        end_idx = len(lines) - 1
+        for idx in range(start_idx + 1, len(lines)):
+            if end_re.match(lines[idx]):
+                end_idx = idx
+                break
+
+        snippet = "\n".join(lines[start_idx:end_idx + 1]).strip()
+        if not snippet:
+            return None
+        if len(snippet) > _FORTRAN_REF_MAX_CHARS:
+            head = snippet[:_FORTRAN_REF_MAX_CHARS]
+            return (
+                head
+                + "\n! ... [Fortran reference truncated to reduce token usage] ..."
+            )
+        return snippet
 
     return None
 
@@ -1006,15 +1033,7 @@ def fix_c_code(
                 status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
             log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
 
-            # Try to find the corresponding Fortran source file
-            # C files from f2c often have similar names (e.g., dgemm.c from dgemm.f)
-            fortran_src = None
-            stem = target.stem
-            for ext in [".f", ".F"]:
-                f_file = c_dir / (stem + ext)
-                if f_file.exists():
-                    fortran_src = f_file.read_text(errors="ignore")
-                    break
+            fortran_src = _find_fortran_source_for_function(c_dir, target.stem)
 
             return _repair_file(
                 llm,
