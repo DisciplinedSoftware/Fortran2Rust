@@ -88,7 +88,7 @@ def _compile_c(c_dir: Path) -> tuple[bool, str]:
 def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset_dir: Path) -> tuple[bool, str, Path | None, float | None]:
     """Compile and run a C benchmark driver. Returns (ok, error, output_bin_path, c_time_ms)."""
     c_lib_files = [f for f in sorted(c_dir.glob("*.c")) if "bench_" not in f.name]
-    exe = output_dir / ("bench_c_" + bench_c.stem)
+    exe = output_dir / bench_c.stem  # e.g. bench_dgemm (not bench_c_bench_dgemm)
     cmd = (
         ["gcc", "-O2", f"-I{c_dir}", str(bench_c)]
         + [str(f) for f in c_lib_files]
@@ -105,9 +105,15 @@ def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset
     if r.returncode != 0:
         return False, r.stdout + r.stderr, None, None
 
+    # Copy dataset binaries into output_dir so the bench exe can run from there.
+    for ds_file in sorted(dataset_dir.glob("dataset_*.bin")):
+        dest = output_dir / ds_file.name
+        if not dest.exists():
+            shutil.copy(ds_file, dest)
+
     run = subprocess.run(
-        [str(exe)], capture_output=True, text=True,
-        cwd=str(dataset_dir),   # run in dataset dir so it finds dataset_*.bin
+        [str(exe.resolve())], capture_output=True, text=True,
+        cwd=str(output_dir),  # run from output_dir where datasets are now present
         timeout=300,
     )
     with open(bench_log, "a") as fh:
@@ -124,14 +130,10 @@ def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset
     if m:
         c_time_ms = float(m.group(1))
 
-    # output bin is written to cwd (dataset_dir)
     fn_name = re.sub(r"^bench_", "", bench_c.stem)
-    bin_out = dataset_dir / f"bench_{fn_name}_output_c.bin"
-    # The C benchmark writes bench_<fn>_output.bin — copy so we don't overwrite Fortran's
-    orig = dataset_dir / f"bench_{fn_name}_output.bin"
-    if orig.exists():
-        shutil.copy(orig, bin_out)
-    return True, "", bin_out if bin_out.exists() else None, c_time_ms
+    # The bench driver writes bench_{fn_name}_output.bin to cwd (output_dir)
+    c_bin = output_dir / f"bench_{fn_name}_output.bin"
+    return True, "", c_bin if c_bin.exists() else None, c_time_ms
 
 
 def _repair_file(llm: "LLMClient", failing_file: Path, error: str) -> None:

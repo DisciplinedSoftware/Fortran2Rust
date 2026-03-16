@@ -546,6 +546,50 @@ def generate_benchmarks(
 
         benchmarks[ep] = bench_info
 
+        # Compile and run precision Fortran driver (BLAS functions only).
+        # Produces bench_{ep_lower}_precision_output.bin used as baseline in Stage 4.
+        if ep_upper in KNOWN_BLAS:
+            prec_driver_file = output_dir / f"bench_{ep_lower}_precision.f"
+            if prec_driver_file.exists():
+                prec_exe = (output_dir / f"bench_{ep_lower}_precision").resolve()
+                prec_compile_cmd = (
+                    ["gfortran", "-O2", str(prec_driver_file.resolve())]
+                    + fortran_deps
+                    + ["-lm", "-o", str(prec_exe)]
+                )
+                prec_log = output_dir / f"gfortran_{ep_lower}_precision.log"
+                try:
+                    if status_fn:
+                        status_fn(f"Compiling Fortran precision benchmark for {ep}…")
+                    log.info(f"Compiling Fortran precision benchmark for {ep}")
+                    prec_result = subprocess.run(
+                        prec_compile_cmd, capture_output=True, text=True, timeout=120,
+                    )
+                    prec_log.write_text(
+                        f"=== COMMAND ===\n{' '.join(prec_compile_cmd)}\n\n"
+                        f"=== STDOUT ===\n{prec_result.stdout}\n"
+                        f"=== STDERR ===\n{prec_result.stderr}\n"
+                        f"=== EXIT CODE: {prec_result.returncode} ===\n"
+                    )
+                    if prec_result.returncode == 0:
+                        log.info(f"  gfortran precision OK for {ep}")
+                        prec_run = subprocess.run(
+                            [str(prec_exe)], capture_output=True, text=True,
+                            cwd=str(output_dir.resolve()), timeout=300,
+                        )
+                        with open(prec_log, "a") as fh:
+                            fh.write(
+                                f"\n=== RUN STDOUT ===\n{prec_run.stdout}\n"
+                                f"=== RUN STDERR ===\n{prec_run.stderr}\n"
+                                f"=== RUN EXIT CODE: {prec_run.returncode} ===\n"
+                            )
+                        log.info(f"  Fortran precision run exit {prec_run.returncode}")
+                    else:
+                        log.warning(f"  gfortran precision FAILED for {ep}: {prec_result.stderr[:300]}")
+                except Exception as e:
+                    prec_log.write_text(f"Exception: {e}\n")
+                    log.warning(f"  Fortran precision exception for {ep}: {e}")
+
     result_data = {
         "benchmarks": benchmarks,
         "bench_files": bench_files,
