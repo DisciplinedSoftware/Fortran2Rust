@@ -1,0 +1,21 @@
+{
+  "name": "Fortran2Rust",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceFolder": "/workspaces/Fortran2Rust",
+  "postCreateCommand": "pip3 install -e '.[dev]'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "rust-lang.rust-analyzer",
+        "ekho.fortran-language-server"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3"
+      }
+    }
+  },
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/home/vscode/.cargo/bin"
+  }
+}

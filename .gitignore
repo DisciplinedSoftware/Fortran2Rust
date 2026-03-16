@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.egg-info/
+.env
+
+# Artifacts / pipeline output
+artifacts/
+.fortran2rust/
+
+# Rust
+target/
+*.o
+*.a
+*.bin
+*.tgz
