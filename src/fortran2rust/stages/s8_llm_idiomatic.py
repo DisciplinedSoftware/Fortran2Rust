@@ -26,6 +26,9 @@ from ._log import make_stage_logger
 
 _console = Console(stderr=True)
 
+_MAX_BENCH_SLOWDOWN_RATIO = 1.5
+_MIN_REGRESSION_MS = 5.0
+
 IDIOMATIC_SYSTEM_PROMPT = (
     "You are a Rust expert. Rewrite this Rust code to be idiomatic: use iterators instead of raw loops, "
     "use Vec/slice indexing instead of raw pointers, improve naming conventions (snake_case), use proper "
@@ -50,6 +53,43 @@ def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
         timeout=300,
     )
     return result.returncode == 0, result.stdout + result.stderr
+
+
+def _load_previous_bench_results(rust_dir: Path) -> dict[str, dict]:
+    result_path = rust_dir / "result.json"
+    if not result_path.exists():
+        return {}
+    try:
+        return json.loads(result_path.read_text()).get("bench_results", {})
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def _find_bench_regressions(
+    previous_results: dict[str, dict],
+    current_results: dict[str, dict],
+) -> list[dict[str, float | str]]:
+    regressions: list[dict[str, float | str]] = []
+    for fn_name, current in current_results.items():
+        previous = previous_results.get(fn_name)
+        if not previous:
+            continue
+        prev_time = previous.get("time_ms")
+        curr_time = current.get("time_ms")
+        if not previous.get("run_ok") or not current.get("run_ok"):
+            continue
+        if prev_time is None or curr_time is None or prev_time <= 0:
+            continue
+        ratio = curr_time / prev_time
+        delta_ms = curr_time - prev_time
+        if ratio >= _MAX_BENCH_SLOWDOWN_RATIO and delta_ms >= _MIN_REGRESSION_MS:
+            regressions.append({
+                "function": fn_name,
+                "previous_ms": float(prev_time),
+                "current_ms": float(curr_time),
+                "ratio": float(ratio),
+            })
+    return regressions
 
 
 def _apply_llm_response(response: str, target_file: Path) -> None:
@@ -77,6 +117,8 @@ def make_idiomatic(
     llm_log: list[dict] = []
     llm_turns = 0
     retries = 0
+    reverted_for_performance = False
+    previous_bench_results = _load_previous_bench_results(rust_dir)
 
     rs_files = [
         f for f in output_dir.rglob("*.rs")
@@ -205,8 +247,41 @@ def make_idiomatic(
         status_fn("Running Rust benchmarks…")
     log.info("Running Rust benchmarks")
     bench_results = run_rust_benchmarks(output_dir, baseline_dir, cargo_toml, log, status_fn)
+    regressions = _find_bench_regressions(previous_bench_results, bench_results)
+    if regressions:
+        reverted_for_performance = True
+        log.warning(
+            "Idiomatic rewrite caused benchmark regressions; reverting rewritten files: "
+            f"{regressions}"
+        )
+        _console.print(
+            "  [yellow]⚠ Idiomatic rewrite regressed benchmark performance[/yellow]: "
+            + ", ".join(
+                f"{r['function']} {r['current_ms']:.1f}ms vs {r['previous_ms']:.1f}ms ({r['ratio']:.2f}x)"
+                for r in regressions
+            )
+        )
+        if status_fn:
+            status_fn("Reverting idiomatic rewrites after benchmark regression…")
+        for rs_file in rs_files:
+            orig = rust_dir / rs_file.relative_to(output_dir)
+            if orig.exists():
+                shutil.copy(orig, rs_file)
+        build_ok, build_output = _cargo_build(cargo_toml)
+        with open(cargo_build_log, "a") as fh:
+            fh.write(
+                "=== reverted after benchmark regression ===\n"
+                f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+            )
+        if build_ok:
+            bench_results = run_rust_benchmarks(output_dir, baseline_dir, cargo_toml, log, status_fn)
+        else:
+            log.warning("Build failed after reverting idiomatic rewrites")
     print_bench_summary(bench_results, {})
     result["bench_results"] = bench_results
+    result["reverted_for_performance"] = reverted_for_performance
+    if regressions:
+        result["performance_regressions"] = regressions
 
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
     log.info("Stage complete")
