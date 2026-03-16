@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from rich.console import Console
 
 _MAX_ERROR_LINES = 60
+_RATE_LIMIT_MAX_RETRIES = 10
+_RATE_LIMIT_INITIAL_BACKOFF = 1.0  # Start with 1 second
+_RATE_LIMIT_MAX_BACKOFF = 120.0  # Cap at 2 minutes
 
 
 def _truncate_error(error: str, max_lines: int = _MAX_ERROR_LINES) -> str:
@@ -52,6 +56,47 @@ class LLMClient(ABC):
         self._local.last_usage = usage
         _console.print(f"  [dim]↳ {usage}[/dim]")
 
+    def _is_rate_limit_error(self, error: Exception) -> bool:
+        """Check if an exception is a rate limit error."""
+        error_str = str(error).lower()
+        error_type = type(error).__name__
+
+        # Check common rate limit error types
+        if "ratelimiterror" in error_type.lower():
+            return True
+        if "toomanyrequests" in error_type:
+            return True
+
+        # Check for 429 status code or rate limit messages
+        if "429" in error_str or "rate limit" in error_str:
+            return True
+        if "ratelimitreached" in error_str or "userconcurrentrequests" in error_str:
+            return True
+
+        return False
+
+    def _call_llm_with_retry(self, system: str, user: str) -> str:
+        """Call the LLM API with exponential backoff for rate limit errors."""
+        backoff = _RATE_LIMIT_INITIAL_BACKOFF
+
+        for attempt in range(_RATE_LIMIT_MAX_RETRIES):
+            try:
+                return self._call_llm(system, user)
+            except Exception as e:
+                if not self._is_rate_limit_error(e):
+                    raise
+
+                is_last_attempt = attempt == _RATE_LIMIT_MAX_RETRIES - 1
+                if is_last_attempt:
+                    raise
+
+                _console.print(
+                    f"  [yellow]⚠ Rate limit error (429), retrying in {backoff:.1f}s "
+                    f"(attempt {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES})...[/yellow]"
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, _RATE_LIMIT_MAX_BACKOFF)
+
     @abstractmethod
     def _call_llm(self, system: str, user: str) -> str:
         """Call the LLM API and return the assistant's response text."""
@@ -59,7 +104,7 @@ class LLMClient(ABC):
 
     def complete(self, system: str, user: str) -> str:
         """Send a chat completion, log the full conversation, and return the response."""
-        response = self._call_llm(system, user)
+        response = self._call_llm_with_retry(system, user)
         # Capture usage immediately after the call (thread-local, safe) before
         # taking the lock so API latency is never held under the lock.
         usage = self.last_usage
