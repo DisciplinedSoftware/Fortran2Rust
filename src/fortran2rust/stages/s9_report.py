@@ -62,33 +62,19 @@ tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
-{% if precision_table %}
+{% if comparison_table %}
 <div class="card">
-  <h2>Numerical Precision</h2>
+  <h2>Numerical Precision &amp; Performance</h2>
   <table>
-    <tr><th>Function</th><th>Max Abs Diff</th><th>Max Rel Diff</th><th>Status</th></tr>
-    {% for row in precision_table %}
+    <tr><th>Function</th><th>Max Abs Diff</th><th>Max Rel Diff</th><th>Status</th><th>Fortran (ms)</th><th>Rust (ms)</th><th>Speedup</th></tr>
+    {% for row in comparison_table %}
     <tr>
       <td>{{ row.function }}</td>
       <td>{{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }}</td>
       <td>{{ "%.2e" | format(row.max_rel_diff) if row.max_rel_diff is not none else "N/A" }}</td>
-      <td><span class="{{ 'status-pass' if row.ok else 'status-fail' }}">{{ 'PASS' if row.ok else 'FAIL' }}</span></td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
-{% endif %}
-
-{% if perf_table %}
-<div class="card">
-  <h2>Performance Comparison</h2>
-  <table>
-    <tr><th>Function</th><th>Fortran (ms)</th><th>Rust (ms)</th><th>Speedup</th></tr>
-    {% for row in perf_table %}
-    <tr>
-      <td>{{ row.function }}</td>
-      <td>{{ "%.4f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }}</td>
-      <td>{{ "%.4f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }}</td>
+      <td>{% if row.status == "pass" %}<span class="status-pass">PASS</span>{% elif row.status == "fail" %}<span class="status-fail">FAIL</span>{% else %}—{% endif %}</td>
+      <td>{{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }}</td>
+      <td>{{ "%.1f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }}</td>
       <td>{% if row.speedup is not none %}<span class="perf-ratio">{{ "%.2fx" | format(row.speedup) }}</span>{% else %}N/A{% endif %}</td>
     </tr>
     {% endfor %}
@@ -129,21 +115,12 @@ MD_TEMPLATE = """# Fortran2Rust Pipeline Report
 | LLM Turns Used | {{ summary.llm_turns_total }} |
 | Overall Status | {{ 'PASS' if summary.overall_ok else 'FAIL' }} |
 
-{% if precision_table %}
-## Numerical Precision
+{% if comparison_table %}
+## Numerical Precision & Performance
 
-| Function | Max Abs Diff | Max Rel Diff | Status |
-|----------|-------------|-------------|--------|
-{% for row in precision_table %}| {{ row.function }} | {{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }} | {{ "%.2e" | format(row.max_rel_diff) if row.max_rel_diff is not none else "N/A" }} | {{ 'PASS' if row.ok else 'FAIL' }} |
-{% endfor %}
-{% endif %}
-
-{% if perf_table %}
-## Performance Comparison
-
-| Function | Fortran (ms) | Rust (ms) | Speedup |
-|----------|-------------|-----------|---------|
-{% for row in perf_table %}| {{ row.function }} | {{ "%.4f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.4f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.speedup) if row.speedup is not none else "N/A" }} |
+| Function | Max Abs Diff | Max Rel Diff | Status | Fortran (ms) | Rust (ms) | Speedup |
+|----------|-------------|-------------|--------|-------------|-----------|---------|
+{% for row in comparison_table %}| {{ row.function }} | {{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }} | {{ "%.2e" | format(row.max_rel_diff) if row.max_rel_diff is not none else "N/A" }} | {{ "PASS" if row.status == "pass" else ("FAIL" if row.status == "fail" else "—") }} | {{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.1f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.speedup) if row.speedup is not none else "N/A" }} |
 {% endfor %}
 {% endif %}
 
@@ -195,8 +172,8 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
         status_fn("Collecting benchmark results…")
     log.info("Collecting benchmark results")
 
-    # Collect benchmark data
-    bench_data = {}
+    # Fortran baseline times from s2 benchmarks.json
+    bench_data: dict = {}
     s2_dirs = [d for d in run_dir.iterdir() if d.is_dir() and d.name.startswith("s2_")]
     if s2_dirs:
         bench_json = s2_dirs[0] / "benchmarks.json"
@@ -206,22 +183,47 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
             except Exception:
                 pass
 
-    perf_table = []
-    precision_table = []
+    # Rust bench results — prefer the last completed stage (s8 → s7 → s6)
+    rust_bench: dict = {}
+    for stage_num in (8, 7, 6):
+        candidate = stage_results.get(stage_num, {}).get("bench_results", {})
+        if candidate:
+            rust_bench = candidate
+            log.info(f"Using bench_results from stage {stage_num}")
+            break
+
+    comparison_table = []
     for ep in entry_points:
-        ep_data = bench_data.get(ep, {})
-        fortran_ms = ep_data.get("time_ms")
-        perf_table.append({
+        fortran_ms = bench_data.get(ep, {}).get("time_ms")
+        rb = rust_bench.get(ep)
+
+        if rb and rb.get("run_ok"):
+            max_abs_diff = rb.get("max_abs_diff")
+            max_rel_diff = rb.get("max_rel_diff")
+            rust_ms = rb.get("time_ms")
+            speedup = (fortran_ms / rust_ms) if (fortran_ms and rust_ms) else None
+            status = "pass"
+        elif rb:
+            max_abs_diff = None
+            max_rel_diff = None
+            rust_ms = None
+            speedup = None
+            status = "fail"
+        else:
+            max_abs_diff = None
+            max_rel_diff = None
+            rust_ms = None
+            speedup = None
+            status = "n/a"
+
+        comparison_table.append({
             "function": ep,
+            "max_abs_diff": max_abs_diff,
+            "max_rel_diff": max_rel_diff,
+            "status": status,
             "fortran_ms": fortran_ms,
-            "rust_ms": None,
-            "speedup": None,
-        })
-        precision_table.append({
-            "function": ep,
-            "max_abs_diff": None,
-            "max_rel_diff": None,
-            "ok": True,
+            "rust_ms": rust_ms,
+            "speedup": speedup,
         })
 
     stage_log = _collect_stage_log(run_dir, stage_results)
@@ -244,8 +246,7 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
         "run_id": run_id,
         "timestamp": timestamp,
         "summary": summary,
-        "perf_table": perf_table,
-        "precision_table": precision_table,
+        "comparison_table": comparison_table,
         "stage_log": stage_log,
     }
 

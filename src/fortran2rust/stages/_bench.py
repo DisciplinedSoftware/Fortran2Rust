@@ -209,6 +209,7 @@ def run_rust_benchmarks(
             "run_ok": run.returncode == 0,
             "time_ms": None,
             "max_abs_diff": None,
+            "max_rel_diff": None,
             "run_error": "",
         }
         if run.returncode != 0:
@@ -225,7 +226,11 @@ def run_rust_benchmarks(
                 r_data = np.fromfile(str(rust_out), dtype=dtype)
                 f_data = np.fromfile(str(fortran_bin), dtype=dtype)
                 if r_data.shape == f_data.shape:
-                    entry["max_abs_diff"] = float(np.max(np.abs(r_data - f_data)))
+                    abs_diff = np.abs(r_data - f_data)
+                    entry["max_abs_diff"] = float(np.max(abs_diff))
+                    entry["max_rel_diff"] = float(
+                        np.max(abs_diff / np.maximum(np.abs(f_data), 1e-10))
+                    )
                     log.info(
                         f"  {fn_name}: max_abs_diff={entry['max_abs_diff']:.3e}"
                         f", time_ms={entry['time_ms']}"
