@@ -82,7 +82,21 @@ def run_interactive_menu() -> tuple[Path, list[str], Config]:
     max_retries = int(questionary.text("Max LLM retries per stage [5]:", default="5").ask() or "5")
 
     all_stages = list(range(1, 10))
-    stage_choices = [questionary.Choice(f"Stage {i}", value=i, checked=True) for i in all_stages]
+    _STAGE_NAMES = {
+        1: "Dependency Analysis",
+        2: "Benchmark Generation",
+        3: "Fortran → C (f2c)",
+        4: "LLM Fix C",
+        5: "C → Rust (c2rust)",
+        6: "LLM Fix Rust",
+        7: "LLM: Make Safe",
+        8: "LLM: Make Idiomatic",
+        9: "Report Generation",
+    }
+    stage_choices = [
+        questionary.Choice(f"Stage {i}: {_STAGE_NAMES[i]}", value=i, checked=True)
+        for i in all_stages
+    ]
     stages = questionary.checkbox("Stages to run:", choices=stage_choices).ask() or all_stages
 
     config = load_config(
