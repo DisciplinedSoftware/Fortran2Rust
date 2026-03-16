@@ -4,7 +4,6 @@ import json
 import re
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,7 +14,7 @@ if TYPE_CHECKING:
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
 from ._bench import _fix_bench_extern_types, _fix_stable_rust_features, _get_failing_rust_files, print_bench_summary, run_rust_benchmarks
-from ._llm_cleanup import compact_rust_for_llm, filter_errors_for_file, restore_rust_files_after_llm, split_llm_file_response, strip_markdown_fences
+from ._llm_cleanup import batch_repair_files, compact_rust_for_llm, filter_errors_for_file, restore_rust_files_after_llm, split_llm_file_response, strip_markdown_fences
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -129,23 +128,17 @@ def fix_rust_code(
             )
         log.info(f"LLM repair attempt {attempt+1}/{max_retries}: {[f.name for f in failing]}")
 
-        def _repair(rs_file: Path) -> tuple:
-            original = rs_file.read_text()
-            compact_code, preserved_prefix = compact_rust_for_llm(original)
-            response = llm.repair(
-                context=(
-                    "Fix this Rust file that was transpiled from C by c2rust. "
-                    "Leading comments were removed before sending to reduce token usage. "
-                    "Fix all compilation errors shown."
-                ),
-                error=filter_errors_for_file(build_output, rs_file.name),
-                code=compact_code,
-                attempt=attempt,
-            )
-            return rs_file, response, preserved_prefix
-
-        with ThreadPoolExecutor(max_workers=len(failing)) as executor:
-            repairs = list(executor.map(_repair, failing))
+        repairs = batch_repair_files(
+            llm,
+            failing,
+            build_output,
+            context=(
+                "Fix this Rust file that was transpiled from C by c2rust. "
+                "Leading comments were removed before sending to reduce token usage. "
+                "Fix all compilation errors shown."
+            ),
+            attempt=attempt,
+        )
 
         for rs_file, response, preserved_prefix in repairs:
             preserved_prefixes = {rs_file.resolve(): preserved_prefix}

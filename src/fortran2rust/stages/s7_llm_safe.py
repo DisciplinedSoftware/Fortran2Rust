@@ -23,7 +23,7 @@ from ._bench import (
     print_bench_summary,
     run_rust_benchmarks,
 )
-from ._llm_cleanup import compact_rust_for_llm, filter_errors_for_file, restore_rust_after_llm, strip_markdown_fences
+from ._llm_cleanup import batch_repair_files, compact_rust_for_llm, filter_errors_for_file, restore_rust_after_llm, strip_markdown_fences
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -174,21 +174,16 @@ def make_safe(
                 f"failing: {[f.name for f in failing]}"
             )
 
-            def _repair(rs_file: Path) -> tuple:
-                original = rs_file.read_text()
-                compact_code, preserved_prefix = compact_rust_for_llm(original)
-                return rs_file, llm.repair(
-                    context=(
-                        "Fix compilation error after removing unsafe blocks in Rust code. "
-                        "Leading comments were removed before sending to reduce token usage."
-                    ),
-                    error=filter_errors_for_file(build_output, rs_file.name),
-                    code=compact_code,
-                    attempt=attempt,
-                ), preserved_prefix
-
-            with ThreadPoolExecutor(max_workers=len(failing)) as executor:
-                repairs = list(executor.map(_repair, failing))
+            repairs = batch_repair_files(
+                llm,
+                failing,
+                build_output,
+                context=(
+                    "Fix compilation error after removing unsafe blocks in Rust code. "
+                    "Leading comments were removed before sending to reduce token usage."
+                ),
+                attempt=attempt,
+            )
 
             for rs_file, response, preserved_prefix in repairs:
                 _apply_llm_response(response, rs_file)

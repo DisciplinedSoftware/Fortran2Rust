@@ -151,3 +151,93 @@ def filter_errors_for_file(build_output: str, filename: str) -> str:
             in_block = False
 
     return "".join(relevant) if relevant else build_output
+
+
+_BATCH_SIZE = 4
+
+
+def batch_repair_files(
+    llm,
+    failing: list[Path],
+    build_output: str,
+    context: str,
+    attempt: int,
+) -> list[tuple[Path, str, str]]:
+    """Repair *failing* Rust files, batching up to _BATCH_SIZE files per LLM call.
+
+    Returns a list of (file, response_text, preserved_prefix) tuples.
+
+    Files are grouped into batches.  Each batch is sent as a single
+    ``--- filename ---`` delimited prompt so the number of LLM calls is
+    ceil(N / _BATCH_SIZE) instead of N.  The batch error section contains
+    only the error blocks that reference the files in that batch.
+
+    If the LLM response cannot be split back into per-file sections the
+    function falls back to individual full-file responses (writing the
+    entire response for each file in the batch — callers discard invalid
+    content via their normal validation logic).
+    """
+    results: list[tuple[Path, str, str]] = []
+
+    for i in range(0, len(failing), _BATCH_SIZE):
+        batch = failing[i : i + _BATCH_SIZE]
+
+        if len(batch) == 1:
+            rs_file = batch[0]
+            compact_code, preserved_prefix = compact_rust_for_llm(rs_file.read_text())
+            response = llm.repair(
+                context=context,
+                error=filter_errors_for_file(build_output, rs_file.name),
+                code=compact_code,
+                attempt=attempt,
+            )
+            results.append((rs_file, response, preserved_prefix))
+            continue
+
+        # Build a combined prompt with one section per file.
+        compacted: list[tuple[Path, str, str]] = [
+            (f, *compact_rust_for_llm(f.read_text())) for f in batch
+        ]
+        code_section = "\n\n".join(
+            f"--- {f.name} ---\n{compact_code}" for f, compact_code, _ in compacted
+        )
+        batch_error = "\n\n".join(
+            filter_errors_for_file(build_output, f.name) for f in batch
+        )
+        batch_context = (
+            context
+            + " Each file is delimited by '--- filename.rs ---'. "
+            "Return each fixed file in the same '--- filename.rs ---' format."
+        )
+        response = llm.repair(
+            context=batch_context,
+            error=batch_error,
+            code=code_section,
+            attempt=attempt,
+        )
+
+        # Try to split the multi-file response.
+        file_map = {f.name: (f, prefix) for f, _, prefix in compacted}
+        parsed = split_llm_file_response(response, (".rs",))
+        if parsed:
+            returned = {name for name, _ in parsed}
+            for name, content in parsed:
+                if name in file_map:
+                    f, prefix = file_map[name]
+                    results.append((f, content, prefix))
+            # Any file not returned by the LLM is left with its original content.
+            for f, compact_code, prefix in compacted:
+                if f.name not in returned:
+                    results.append((f, f.read_text(), prefix))
+        else:
+            # Response is not split — fall back to individual calls for this batch.
+            for f, compact_code, prefix in compacted:
+                fb_response = llm.repair(
+                    context=context,
+                    error=filter_errors_for_file(build_output, f.name),
+                    code=compact_code,
+                    attempt=attempt,
+                )
+                results.append((f, fb_response, prefix))
+
+    return results
