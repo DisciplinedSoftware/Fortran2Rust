@@ -49,6 +49,7 @@ def fix_rust_code(
     llm: "LLMClient",
     max_retries: int,
     baseline_dir: Path,
+    status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -63,10 +64,14 @@ def fix_rust_code(
     retries = 0
 
     # Build loop
+    if status_fn:
+        status_fn("cargo build…")
     build_ok, build_error = _cargo_build(cargo_toml)
     for attempt in range(max_retries):
         if build_ok:
             break
+        if status_fn:
+            status_fn(f"LLM: fixing Rust compilation (attempt {attempt+1}/{max_retries})…")
         code = _read_rust_files(output_dir)
         response = llm.repair(
             context="Fix this Rust code that was transpiled from C by c2rust. Fix all compilation errors.",
@@ -88,6 +93,8 @@ def fix_rust_code(
         else:
             try:
                 import numpy as np  # noqa: F401
+                if status_fn:
+                    status_fn(f"Running Rust benchmark…")
                 # Try to run bench binary
                 bench_result = subprocess.run(
                     ["cargo", "test", "--manifest-path", str(cargo_toml)],

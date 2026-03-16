@@ -59,17 +59,21 @@ def _find_or_write_f2c_h(output_dir: Path) -> Path:
     return dest
 
 
-def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path) -> dict:
+def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path, status_fn=None) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     _find_or_write_f2c_h(output_dir)
 
     c_files: list[str] = []
     errors: list[str] = []
+    total = len(fortran_files)
 
-    for f in fortran_files:
+    for i, f in enumerate(fortran_files):
         if not f.exists():
             errors.append(f"File not found: {f}")
             continue
+
+        if status_fn:
+            status_fn(f"f2c: converting {f.name} ({i+1}/{total})…")
 
         # Copy .f file to output_dir so f2c writes .c there
         dest_f = output_dir / f.name
@@ -107,6 +111,8 @@ def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path) -> di
     compile_ok = False
     compile_error = ""
     if c_files:
+        if status_fn:
+            status_fn("Verifying C compilation…")
         verify = subprocess.run(
             ["gcc", "-O2", f"-I{output_dir}", "-o", "/dev/null"] + c_files + ["-lm", "-lf2c"],
             capture_output=True,

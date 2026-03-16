@@ -40,6 +40,7 @@ def make_idiomatic(
     llm: "LLMClient",
     max_retries: int,
     baseline_dir: Path,
+    status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -55,6 +56,8 @@ def make_idiomatic(
 
     for rs_file in rs_files:
         content = rs_file.read_text()
+        if status_fn:
+            status_fn(f"LLM: making {rs_file.name} idiomatic…")
         response = llm.complete(IDIOMATIC_SYSTEM_PROMPT, content)
         llm_log.append({"phase": "idiomatic", "file": rs_file.name})
         llm_turns += 1
@@ -64,6 +67,8 @@ def make_idiomatic(
         for attempt in range(max_retries):
             if build_ok:
                 break
+            if status_fn:
+                status_fn(f"Verifying idiomatic Rust builds… (attempt {attempt+1}/{max_retries})")
             repair_response = llm.repair(
                 context="Fix compilation error after making Rust code idiomatic.",
                 error=build_error,

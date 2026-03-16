@@ -17,21 +17,30 @@ crate-type = ["cdylib", "staticlib"]
 """
 
 
-def ensure_c2rust() -> Path:
+def ensure_c2rust(status_fn=None) -> Path:
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
     path = shutil.which("c2rust")
     if path:
         return Path(path)
 
-    with Progress(SpinnerColumn(), TextColumn("[bold blue]Installing c2rust (this may take a while)..."), transient=True) as p:
-        p.add_task("install", total=None)
+    if status_fn:
+        status_fn("Installing c2rust via cargo (this may take several minutes)…")
         result = subprocess.run(
             ["cargo", "install", "c2rust"],
             capture_output=True,
             text=True,
             timeout=1800,
         )
+    else:
+        with Progress(SpinnerColumn(), TextColumn("[bold blue]Installing c2rust (this may take a while)..."), transient=True) as p:
+            p.add_task("install", total=None)
+            result = subprocess.run(
+                ["cargo", "install", "c2rust"],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to install c2rust:\n{result.stderr}")
 
@@ -41,9 +50,11 @@ def ensure_c2rust() -> Path:
     return Path(path)
 
 
-def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path) -> dict:
+def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, status_fn=None) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if status_fn:
+        status_fn("Transpiling C → Rust with c2rust…")
     result = subprocess.run(
         ["c2rust", "transpile", str(compile_commands), "--output-dir", str(output_dir)],
         capture_output=True,
@@ -54,6 +65,9 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path) -> 
 
     rust_files = sorted(output_dir.glob("**/*.rs"))
     rust_file_strs = [str(f) for f in rust_files]
+
+    if status_fn:
+        status_fn(f"Generated {len(rust_files)} Rust files")
 
     # Generate Cargo.toml
     cargo_toml_path = output_dir / "Cargo.toml"

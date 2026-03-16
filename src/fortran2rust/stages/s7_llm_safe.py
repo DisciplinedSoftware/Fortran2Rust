@@ -41,6 +41,7 @@ def make_safe(
     llm: "LLMClient",
     max_retries: int,
     baseline_dir: Path,
+    status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -61,9 +62,12 @@ def make_safe(
     # Process each file
     for rs_file in rs_files:
         content = rs_file.read_text()
-        if _count_unsafe(content) == 0:
+        n = _count_unsafe(content)
+        if n == 0:
             continue
 
+        if status_fn:
+            status_fn(f"LLM: removing unsafe from {rs_file.name} ({n} occurrences)…")
         response = llm.complete(SAFE_SYSTEM_PROMPT, content)
         llm_log.append({"phase": "safe", "file": str(rs_file.name), "unsafe_count": _count_unsafe(content)})
         llm_turns += 1
@@ -74,6 +78,8 @@ def make_safe(
         for attempt in range(max_retries):
             if build_ok:
                 break
+            if status_fn:
+                status_fn(f"Verifying safe Rust builds… (attempt {attempt+1}/{max_retries})")
             repair_response = llm.repair(
                 context="Fix compilation error after removing unsafe blocks in Rust code.",
                 error=build_error,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from rich.console import Console
 
@@ -43,97 +44,106 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
         9: "Report Generation",
     }
 
-    for stage_num in config.stages:
-        if stage_num not in STAGE_NAMES:
-            continue
-        stage_slug = (
-            STAGE_NAMES[stage_num]
-            .lower()
-            .replace(" ", "_")
-            .replace("→", "to")
-            .replace("(", "")
-            .replace(")", "")
-            .replace(":", "")
-            .strip()
-        )
-        stage_dir = run_dir / f"s{stage_num}_{stage_slug}"
-        stage_dir.mkdir(parents=True, exist_ok=True)
+    with console.status("") as _pipeline_status:
+        for stage_num in config.stages:
+            if stage_num not in STAGE_NAMES:
+                continue
+            stage_slug = (
+                STAGE_NAMES[stage_num]
+                .lower()
+                .replace(" ", "_")
+                .replace("→", "to")
+                .replace("(", "")
+                .replace(")", "")
+                .replace(":", "")
+                .strip()
+            )
+            stage_dir = run_dir / f"s{stage_num}_{stage_slug}"
+            stage_dir.mkdir(parents=True, exist_ok=True)
 
-        console.rule(f"[bold]Stage {stage_num}: {STAGE_NAMES[stage_num]}[/bold]")
+            console.rule(f"[bold]Stage {stage_num}: {STAGE_NAMES[stage_num]}[/bold]")
 
-        try:
-            if stage_num == 1:
-                from .stages.s1_analyze import analyze_dependencies
-                results[1] = analyze_dependencies(library_path, entry_points, stage_dir)
+            # Build a status_fn that prefixes messages with the stage number
+            def _make_status_fn(sn: int) -> Callable[[str], None]:
+                def _fn(msg: str) -> None:
+                    _pipeline_status.update(f"[bold cyan]Stage {sn}:[/bold cyan] {msg}")
+                return _fn
 
-            elif stage_num == 2:
-                from .stages.s2_benchmarks import generate_benchmarks
-                dep_files = [Path(f) for f in results.get(1, {}).get("files", [])]
-                results[2] = generate_benchmarks(library_path, entry_points, dep_files, stage_dir)
+            status_fn = _make_status_fn(stage_num)
+            status_fn("Starting…")
 
-            elif stage_num == 3:
-                from .stages.s3_f2c import run_f2c
-                dep_files = [Path(f) for f in results.get(1, {}).get("files", [])]
-                bench_f_files = [Path(f) for f in results.get(2, {}).get("bench_files", []) if f.endswith(".f")]
-                all_fortran = dep_files + bench_f_files
-                results[3] = run_f2c(library_path, all_fortran, stage_dir)
+            try:
+                if stage_num == 1:
+                    from .stages.s1_analyze import analyze_dependencies
+                    results[1] = analyze_dependencies(library_path, entry_points, stage_dir, status_fn=status_fn)
 
-            elif stage_num == 4:
-                from .stages.s4_llm_fix_c import fix_c_code
-                s3_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s3_")]
-                s3_dir = run_dir / s3_dirs[0].name
-                s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
-                s2_dir = run_dir / s2_dirs[0].name
-                cg = results.get(1, {}).get("call_graph", {})
-                eps = entry_points
-                results[4] = fix_c_code(s3_dir, stage_dir, llm, config.max_retries, s2_dir,
-                                        call_graph=cg, entry_points=eps)
+                elif stage_num == 2:
+                    from .stages.s2_benchmarks import generate_benchmarks
+                    dep_files = [Path(f) for f in results.get(1, {}).get("files", [])]
+                    results[2] = generate_benchmarks(library_path, entry_points, dep_files, stage_dir, status_fn=status_fn)
 
-            elif stage_num == 5:
-                from .stages.s5_c2rust import ensure_c2rust, transpile_to_rust
-                ensure_c2rust()
-                s4_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s4_")]
-                s4_dir = run_dir / s4_dirs[0].name
-                results[5] = transpile_to_rust(s4_dir, s4_dir / "compile_commands.json", stage_dir)
+                elif stage_num == 3:
+                    from .stages.s3_f2c import run_f2c
+                    dep_files = [Path(f) for f in results.get(1, {}).get("files", [])]
+                    bench_f_files = [Path(f) for f in results.get(2, {}).get("bench_files", []) if f.endswith(".f")]
+                    all_fortran = dep_files + bench_f_files
+                    results[3] = run_f2c(library_path, all_fortran, stage_dir, status_fn=status_fn)
 
-            elif stage_num == 6:
-                from .stages.s6_llm_fix_rust import fix_rust_code
-                s5_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s5_")]
-                s5_dir = run_dir / s5_dirs[0].name
-                s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
-                s2_dir = run_dir / s2_dirs[0].name
-                results[6] = fix_rust_code(s5_dir, stage_dir, llm, config.max_retries, s2_dir)
+                elif stage_num == 4:
+                    from .stages.s4_llm_fix_c import fix_c_code
+                    s3_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s3_")]
+                    s3_dir = run_dir / s3_dirs[0].name
+                    s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
+                    s2_dir = run_dir / s2_dirs[0].name
+                    cg = results.get(1, {}).get("call_graph", {})
+                    results[4] = fix_c_code(s3_dir, stage_dir, llm, config.max_retries, s2_dir,
+                                            call_graph=cg, entry_points=entry_points, status_fn=status_fn)
 
-            elif stage_num == 7:
-                from .stages.s7_llm_safe import make_safe
-                s6_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s6_")]
-                s6_dir = run_dir / s6_dirs[0].name
-                s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
-                s2_dir = run_dir / s2_dirs[0].name
-                results[7] = make_safe(s6_dir, stage_dir, llm, config.max_retries, s2_dir)
+                elif stage_num == 5:
+                    from .stages.s5_c2rust import ensure_c2rust, transpile_to_rust
+                    ensure_c2rust(status_fn=status_fn)
+                    s4_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s4_")]
+                    s4_dir = run_dir / s4_dirs[0].name
+                    results[5] = transpile_to_rust(s4_dir, s4_dir / "compile_commands.json", stage_dir, status_fn=status_fn)
 
-            elif stage_num == 8:
-                from .stages.s8_llm_idiomatic import make_idiomatic
-                s7_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s7_")]
-                s7_dir = run_dir / s7_dirs[0].name
-                s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
-                s2_dir = run_dir / s2_dirs[0].name
-                results[8] = make_idiomatic(s7_dir, stage_dir, llm, config.max_retries, s2_dir)
+                elif stage_num == 6:
+                    from .stages.s6_llm_fix_rust import fix_rust_code
+                    s5_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s5_")]
+                    s5_dir = run_dir / s5_dirs[0].name
+                    s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
+                    s2_dir = run_dir / s2_dirs[0].name
+                    results[6] = fix_rust_code(s5_dir, stage_dir, llm, config.max_retries, s2_dir, status_fn=status_fn)
 
-            elif stage_num == 9:
-                from .stages.s9_report import generate_report
-                results[9] = generate_report(run_dir, {
-                    "run_id": run_id,
-                    "entry_points": entry_points,
-                    "config": config.__dict__,
-                    "stage_results": results,
-                })
+                elif stage_num == 7:
+                    from .stages.s7_llm_safe import make_safe
+                    s6_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s6_")]
+                    s6_dir = run_dir / s6_dirs[0].name
+                    s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
+                    s2_dir = run_dir / s2_dirs[0].name
+                    results[7] = make_safe(s6_dir, stage_dir, llm, config.max_retries, s2_dir, status_fn=status_fn)
 
-            console.print(f"  [green]✓ Stage {stage_num} complete[/green]")
+                elif stage_num == 8:
+                    from .stages.s8_llm_idiomatic import make_idiomatic
+                    s7_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s7_")]
+                    s7_dir = run_dir / s7_dirs[0].name
+                    s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
+                    s2_dir = run_dir / s2_dirs[0].name
+                    results[8] = make_idiomatic(s7_dir, stage_dir, llm, config.max_retries, s2_dir, status_fn=status_fn)
 
-        except Exception as e:
-            console.print(f"  [red]✗ Stage {stage_num} failed: {e}[/red]")
-            results[stage_num] = {"error": str(e)}
+                elif stage_num == 9:
+                    from .stages.s9_report import generate_report
+                    results[9] = generate_report(run_dir, {
+                        "run_id": run_id,
+                        "entry_points": entry_points,
+                        "config": config.__dict__,
+                        "stage_results": results,
+                    }, status_fn=status_fn)
+
+                console.print(f"  [green]✓ Stage {stage_num} complete[/green]")
+
+            except Exception as e:
+                console.print(f"  [red]✗ Stage {stage_num} failed: {e}[/red]")
+                results[stage_num] = {"error": str(e)}
 
     report_path = run_dir / "report.html"
     # Try to open reports in VS Code preview (no-op if not in VS Code)

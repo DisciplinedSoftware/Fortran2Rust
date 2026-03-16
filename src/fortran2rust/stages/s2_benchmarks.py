@@ -201,6 +201,7 @@ def generate_benchmarks(
     entry_points: list[str],
     dep_files: list[Path],
     output_dir: Path,
+    status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     benchmarks: dict[str, dict] = {}
@@ -212,6 +213,8 @@ def generate_benchmarks(
         ep_lower = ep.lower()
 
         # Generate shared dataset files
+        if status_fn:
+            status_fn(f"Generating dataset for {ep}…")
         dataset = generate_dataset(ep, N, output_dir)
 
         if ep_upper in KNOWN_BLAS:
@@ -249,12 +252,16 @@ def generate_benchmarks(
         }
 
         try:
+            if status_fn:
+                status_fn(f"Compiling benchmark for {ep}…")
             result = subprocess.run(
                 compile_cmd, capture_output=True, text=True,
                 cwd=str(output_dir), timeout=120,
             )
             if result.returncode == 0:
                 bench_info["compile_ok"] = True
+                if status_fn:
+                    status_fn(f"Running Fortran baseline for {ep}…")
                 run_result = subprocess.run(
                     [str(output_dir / f"bench_{ep_lower}")],
                     capture_output=True, text=True,

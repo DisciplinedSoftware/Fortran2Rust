@@ -23,12 +23,14 @@ def _parse_file(path: Path):
         return None
 
 
-def list_entry_points(source_dir: Path) -> list[str]:
+def list_entry_points(source_dir: Path, status_fn=None) -> list[str]:
     from fparser.two import Fortran2003
     from fparser.two.utils import walk
 
     names = []
     for f in sorted(f for f in source_dir.glob("*.f") if not f.name.startswith(".")):
+        if status_fn:
+            status_fn(f"Parsing {f.name}…")
         tree = _parse_file(f)
         if tree is None:
             continue
@@ -39,7 +41,7 @@ def list_entry_points(source_dir: Path) -> list[str]:
     return sorted(set(names))
 
 
-def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: Path) -> dict:
+def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: Path, status_fn=None) -> dict:
     from fparser.two import Fortran2003
     from fparser.two.utils import walk
 
@@ -50,7 +52,12 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
 
     all_files = sorted(f for f in source_dir.glob("*.f") if not f.name.startswith("."))
 
-    for f in all_files:
+    if status_fn:
+        status_fn(f"Scanning {len(all_files)} Fortran files…")
+
+    for i, f in enumerate(all_files):
+        if status_fn:
+            status_fn(f"Parsing {f.name} ({i+1}/{len(all_files)})…")
         tree = _parse_file(f)
         if tree is None:
             continue
@@ -97,10 +104,16 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
     ))
     reachable_functions = sorted(visited)
 
+    if status_fn:
+        status_fn(f"Found {len(reachable_files)} source files, {len(reachable_functions)} functions")
+
     # Build serializable call graph (sets -> lists)
     serializable_cg = {k: sorted(v) for k, v in call_graph.items() if k in visited}
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if status_fn:
+        status_fn("Writing dependency graph…")
 
     result = {
         "files": reachable_files,

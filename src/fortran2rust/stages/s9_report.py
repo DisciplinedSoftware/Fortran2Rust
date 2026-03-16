@@ -217,11 +217,14 @@ def _collect_stage_log(run_dir: Path, stage_results: dict) -> list[dict]:
     return log
 
 
-def generate_report(run_dir: Path, config: dict) -> Path:
+def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
     run_id = config.get("run_id", run_dir.name)
     entry_points = config.get("entry_points", [])
     stage_results = config.get("stage_results", {})
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if status_fn:
+        status_fn("Collecting benchmark results…")
 
     # Collect benchmark data
     bench_data = {}
@@ -284,7 +287,11 @@ def generate_report(run_dir: Path, config: dict) -> Path:
     html_path = run_dir / "report.html"
     md_path = run_dir / "report.md"
 
+    if status_fn:
+        status_fn("Rendering HTML report…")
     html_path.write_text(html_tmpl.render(**ctx))
+    if status_fn:
+        status_fn("Rendering Markdown report…")
     md_path.write_text(md_tmpl.render(**ctx))
 
     return html_path

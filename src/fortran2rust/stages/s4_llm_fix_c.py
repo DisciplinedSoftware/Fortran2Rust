@@ -125,6 +125,7 @@ def fix_c_code(
     baseline_dir: Path,
     call_graph: dict | None = None,
     entry_points: list[str] | None = None,
+    status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -138,6 +139,8 @@ def fix_c_code(
     total_retries = 0
 
     # ── Compile loop: fix one failing file at a time ──────────────────────────
+    if status_fn:
+        status_fn("Compiling C code…")
     compile_ok, compile_error = _compile_c(output_dir)
     attempt = 0
     while not compile_ok and attempt < max_retries:
@@ -149,11 +152,16 @@ def fix_c_code(
             "target_file": target.name,
             "error_snippet": compile_error[:500],
         })
+        if status_fn:
+            status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
         _repair_file(llm, target, compile_error)
         llm_turns += 1
         total_retries += 1
         compile_ok, compile_error = _compile_c(output_dir)
         attempt += 1
+
+    if compile_ok and status_fn:
+        status_fn("Compilation successful")
 
     # ── Benchmark loop ────────────────────────────────────────────────────────
     bench_ok = False
@@ -170,11 +178,15 @@ def fix_c_code(
                 if not fortran_bin.exists():
                     continue  # no baseline to compare against
 
+                if status_fn:
+                    status_fn(f"Running C benchmark: {bench_c.stem}…")
                 ok, err, c_bin = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
                 for b_attempt in range(max_retries):
                     if ok and c_bin and c_bin.exists():
                         c_data = np.fromfile(str(c_bin), dtype=np.float64)
                         f_data = np.fromfile(str(fortran_bin), dtype=np.float64)
+                        if status_fn:
+                            status_fn(f"Comparing {fn_name} output vs Fortran baseline…")
                         if c_data.shape == f_data.shape and np.allclose(c_data, f_data, atol=1e-10, rtol=1e-10):
                             bench_results[fn_name] = {"pass": True, "max_abs_diff": 0.0}
                             break
@@ -184,6 +196,8 @@ def fix_c_code(
                     llm_log.append({
                         "phase": "bench", "fn": fn_name, "attempt": b_attempt, "error": err[:300],
                     })
+                    if status_fn:
+                        status_fn(f"LLM: fixing numerical precision in {bench_c.name} (attempt {b_attempt+1}/{max_retries})…")
                     _repair_file(llm, bench_c, err)
                     llm_turns += 1
                     total_retries += 1
