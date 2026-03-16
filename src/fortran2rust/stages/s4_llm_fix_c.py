@@ -130,6 +130,28 @@ def _repair_file(llm: "LLMClient", failing_file: Path, error: str) -> None:
     failing_file.write_text(content.strip() + "\n")
 
 
+def _generate_c_from_fortran(llm: "LLMClient", f_file: Path, output_dir: Path) -> Path:
+    """Ask the LLM to convert a Fortran file that f2c could not handle into f2c-compatible C."""
+    c_path = output_dir / f_file.with_suffix(".c").name
+    response = llm.repair(
+        context=(
+            "Convert this Fortran source file to C using the f2c calling convention. "
+            "Rules:\n"
+            "- Include \"f2c.h\" at the top\n"
+            "- All function names must have a trailing underscore (e.g. xerbla_)\n"
+            "- Character arguments must be followed by an extra ftnlen length argument at the end\n"
+            "- Use the types from f2c.h: integer, doublereal, real, ftnlen, etc.\n"
+            "Return ONLY the complete C file, no explanation, no markdown fences."
+        ),
+        error="f2c could not convert this file (likely uses Fortran 90+ features like LEN_TRIM).",
+        code=f_file.read_text(),
+    )
+    content = re.sub(r"^```[a-z]*\n?", "", response.strip(), flags=re.MULTILINE)
+    content = re.sub(r"\n?```$", "", content.strip())
+    c_path.write_text(content.strip() + "\n")
+    return c_path
+
+
 def fix_c_code(
     c_dir: Path,
     output_dir: Path,
@@ -147,7 +169,22 @@ def fix_c_code(
     for f in c_dir.glob("*.h"):
         shutil.copy(f, output_dir / f.name)
 
-    llm_log: list[dict] = []
+    # ── Pre-step: LLM-convert any .f files that f2c could not handle ─────────
+    for f_file in sorted(c_dir.glob("*.f")):
+        c_equiv = output_dir / f_file.with_suffix(".c").name
+        if not c_equiv.exists():
+            _console.print(
+                f"  [yellow]⚠ No C output for[/yellow] [bold]{f_file.name}[/bold] "
+                f"— asking LLM to convert from Fortran…"
+            )
+            if status_fn:
+                status_fn(f"LLM: converting {f_file.name} to C (f2c could not handle it)…")
+            dest_f = output_dir / f_file.name
+            shutil.copy(f_file, dest_f)
+            _generate_c_from_fortran(llm, dest_f, output_dir)
+            llm_turns += 1
+
+
     llm_turns = 0
     total_retries = 0
 
