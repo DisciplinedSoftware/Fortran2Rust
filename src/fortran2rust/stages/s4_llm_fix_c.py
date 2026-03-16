@@ -1026,9 +1026,11 @@ def fix_c_code(
     )
 
     # Generate compile_commands.json with absolute paths for c2rust (Stage 5).
-    # Include all .c files — bench drivers are transpiled too so Rust benchmarks can be built.
+    # Include library .c files only. Benchmark drivers are generated/maintained
+    # separately and can contain harness-specific code that is not suitable for
+    # c2rust transpilation.
     lib_c_files = [
-        f.resolve() for f in sorted(output_dir.glob("*.c"))
+        f.resolve() for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")
     ]
     compile_commands = [
         {

@@ -145,15 +145,63 @@ STAGE_NAMES = {
 }
 
 
+def _evaluate_stage_ok(stage_num: int, stage_result: dict) -> tuple[bool, str]:
+  if not stage_result:
+    # Stage 9 is currently rendering this report, so its result is not yet
+    # inserted into stage_results when this function is called.
+    if stage_num == 9:
+      return True, ""
+    return False, "no stage result"
+
+  if "error" in stage_result:
+    return False, str(stage_result.get("error", ""))
+
+  notes: list[str] = []
+
+  if stage_num == 4:
+    if stage_result.get("compile_ok") is False:
+      notes.append("compile failed")
+    if stage_result.get("bench_ok") is False:
+      notes.append("benchmark checks failed")
+
+  if stage_num == 5 and stage_result.get("ok") is False:
+    notes.append("c2rust transpile incomplete")
+
+  if stage_num == 2:
+    benchmarks = stage_result.get("benchmarks", {})
+    if benchmarks:
+      compile_flags = [
+        bool(info.get("compile_ok"))
+        for info in benchmarks.values()
+        if isinstance(info, dict)
+      ]
+      if compile_flags and not any(compile_flags):
+        notes.append("Fortran baselines did not compile")
+
+  if stage_num == 4:
+    bench_results = stage_result.get("bench_results")
+    if isinstance(bench_results, dict) and not bench_results:
+      notes.append("no C benchmark comparisons produced")
+
+  if stage_num in (6, 7, 8):
+    bench_results = stage_result.get("bench_results")
+    if isinstance(bench_results, dict):
+      if not bench_results:
+        notes.append("no Rust benchmark results")
+      elif any(not bool(br.get("run_ok")) for br in bench_results.values()):
+        notes.append("Rust benchmark run failures")
+
+  return (len(notes) == 0), "; ".join(notes)
+
+
 def _collect_stage_log(run_dir: Path, stage_results: dict) -> list[dict]:
-    log = []
-    for num, name in STAGE_NAMES.items():
-        stage_result = stage_results.get(num, {})
-        ok = "error" not in stage_result
-        llm_turns = stage_result.get("llm_turns", 0)
-        notes = stage_result.get("error", "") if not ok else ""
-        log.append({"num": num, "name": name, "ok": ok, "llm_turns": llm_turns, "notes": str(notes)[:100]})
-    return log
+  log = []
+  for num, name in STAGE_NAMES.items():
+    stage_result = stage_results.get(num, {})
+    ok, notes = _evaluate_stage_ok(num, stage_result)
+    llm_turns = stage_result.get("llm_turns", 0)
+    log.append({"num": num, "name": name, "ok": ok, "llm_turns": llm_turns, "notes": str(notes)[:100]})
+  return log
 
 
 def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
@@ -229,9 +277,11 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
     stage_log = _collect_stage_log(run_dir, stage_results)
     stages_completed = sum(1 for s in stage_log if s["ok"])
     llm_turns_total = sum(s["llm_turns"] for s in stage_log)
+    comparable_rows = [row for row in comparison_table if row["status"] in {"pass", "fail"}]
+    benchmark_ok = bool(comparable_rows) and all(row["status"] == "pass" for row in comparable_rows)
     overall_ok = (
         all(s["ok"] for s in stage_log)
-        and all(row["status"] == "pass" for row in comparison_table)
+      and benchmark_ok
     )
     log.info(f"Stages completed: {stages_completed}/{len(STAGE_NAMES)}, LLM turns: {llm_turns_total}, overall: {'PASS' if overall_ok else 'FAIL'}")
 

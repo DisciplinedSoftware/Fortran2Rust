@@ -98,6 +98,17 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         )
         raise ConversionError("c2rust", first_error)
 
+    src_dir = output_dir / "src"
+    lib_modules = [
+        f for f in rust_files
+        if f.parent == src_dir and f.name != "lib.rs" and not f.name.startswith("bench_")
+    ]
+    if not lib_modules:
+        raise ConversionError(
+            "c2rust",
+            "No library Rust modules were generated (only benchmark/transient files).",
+        )
+
     if status_fn:
         status_fn(f"Generated {len(rust_files)} Rust files")
 
@@ -107,7 +118,6 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
 
     # Generate src/lib.rs that re-exports all modules.
     # c2rust places .rs files in src/ (not in the output root), so compare against src_dir.
-    src_dir = output_dir / "src"
     src_dir.mkdir(exist_ok=True)
     lib_rs = src_dir / "lib.rs"
     modules = sorted(

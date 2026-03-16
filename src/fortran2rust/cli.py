@@ -6,17 +6,6 @@ from pathlib import Path
 from .config import PROVIDERS, load_config
 
 
-def parse_stages(s: str) -> list[int]:
-    stages = []
-    for part in s.split(","):
-        if "-" in part:
-            a, b = part.split("-")
-            stages.extend(range(int(a), int(b) + 1))
-        else:
-            stages.append(int(part))
-    return sorted(set(stages))
-
-
 def main():
     parser = argparse.ArgumentParser(
         prog="fortran2rust",
@@ -25,7 +14,7 @@ def main():
     parser.add_argument(
         "-i", "--non-interactive",
         action="store_true",
-        help="Skip all menus; auto-convert dgemm from BLAS using .env config",
+        help="Skip menus and run from CLI args; defaults to BLAS + dgemm when omitted",
     )
     parser.add_argument(
         "--library",
@@ -39,8 +28,11 @@ def main():
     )
     parser.add_argument(
         "--stages",
-        default="1-9",
-        help="Stages to run, e.g. '1-9' or '1,3,5' (default: 1-9)",
+        type=int,
+        default=9,
+        metavar="N",
+        choices=range(1, 10),
+        help="Run all stages from 1 through N (default: 9)",
     )
     parser.add_argument(
         "--quick",
@@ -82,14 +74,25 @@ def _run_non_interactive(args):
     from .pipeline import run_pipeline
 
     console = Console()
-    console.print("[bold blue]Fortran2Rust[/bold blue] — non-interactive mode (dgemm demo)")
+    console.print("[bold blue]Fortran2Rust[/bold blue] — non-interactive mode")
 
-    library_path = get_blas_source(console)
-    entry_points = ["dgemm"]
+    if args.library and args.library != "blas":
+        library_path = Path(args.library).expanduser().resolve()
+    else:
+        library_path = get_blas_source(console)
+
+    if args.entry_points:
+        if args.entry_points == "all":
+            from .stages.s1_analyze import list_entry_points
+            entry_points = list_entry_points(library_path)
+        else:
+            entry_points = [e.strip() for e in args.entry_points.split(",") if e.strip()]
+    else:
+        entry_points = ["dgemm"]
 
     overrides = {
         "max_retries": args.max_retries,
-        "stages": [s for s in parse_stages(args.stages) if not args.quick or s not in (7, 8)],
+        "stages": [s for s in range(1, args.stages + 1) if not args.quick or s not in (7, 8)],
         "output_dir": Path(args.output_dir),
     }
     if args.llm_provider:
@@ -119,6 +122,14 @@ def _run_interactive(args):
             entry_points = list_entry_points(library_path)
         else:
             entry_points = [e.strip() for e in args.entry_points.split(",")]
+
+    config.stages = [s for s in range(1, args.stages + 1) if not args.quick or s not in (7, 8)]
+    config.max_retries = args.max_retries
+    config.output_dir = Path(args.output_dir)
+    if args.llm_provider:
+        config.llm_provider = args.llm_provider
+    if args.model:
+        config.llm_model = args.model
 
     run_pipeline(config, library_path, entry_points)
 
