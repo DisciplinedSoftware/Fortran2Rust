@@ -30,14 +30,15 @@ class Config:
 
 def load_config(**overrides) -> Config:
     """Read env vars, apply overrides, and return a Config."""
+    generic_api_key = os.getenv("LLM_API_KEY", "")
     cfg = Config(
         llm_provider=os.getenv("LLM_PROVIDER", "openai"),
         llm_model=os.getenv("LLM_MODEL", "gpt-4o"),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "16384")),
-        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-        google_api_key=os.getenv("GOOGLE_API_KEY", ""),
-        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "") or generic_api_key,
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "") or generic_api_key,
+        google_api_key=os.getenv("GOOGLE_API_KEY", "") or generic_api_key,
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "") or generic_api_key,
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         max_retries=int(os.getenv("MAX_RETRIES", "5")),
         output_dir=Path(os.getenv("OUTPUT_DIR", "./artifacts")),

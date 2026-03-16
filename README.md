@@ -11,6 +11,7 @@ The easiest way to get started is with the included dev container, which pre-ins
 1. Open the repository in VS Code.
 2. When prompted, click **"Reopen in Container"** (or run **Dev Containers: Reopen in Container** from the command palette).
 3. Copy `.env.example` to `.env` and fill in your LLM API key.
+   - You can set either a provider-specific key (for example `ANTHROPIC_API_KEY`) or a generic `LLM_API_KEY` fallback.
    - For large files, increase `LLM_MAX_TOKENS` (for example `16384`) to reduce truncated LLM outputs.
 4. Run the pipeline:
    ```bash
