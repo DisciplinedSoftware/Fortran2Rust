@@ -79,8 +79,13 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
             # so we collect all Part_Ref names and filter to known defined names in BFS.
             for ref in walk(subprog, Fortran2003.Part_Ref):
                 calls.add(str(ref.items[0]).upper())
-            # Explicit Function_Reference nodes (some parsers emit these separately)
+            # Explicit Function_Reference nodes
             for ref in walk(subprog, Fortran2003.Function_Reference):
+                calls.add(str(ref.items[0]).upper())
+            # EXTERNAL functions are parsed as Structure_Constructor by fparser2
+            # (e.g. LSAME(TRANSA,'N') when LSAME is declared EXTERNAL).
+            # items[0] is a Type_Name whose text is the function name.
+            for ref in walk(subprog, Fortran2003.Structure_Constructor):
                 calls.add(str(ref.items[0]).upper())
 
             if name not in call_graph:
