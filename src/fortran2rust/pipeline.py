@@ -74,7 +74,9 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
             elif stage_num == 3:
                 from .stages.s3_f2c import run_f2c
                 dep_files = [Path(f) for f in results.get(1, {}).get("files", [])]
-                results[3] = run_f2c(library_path, dep_files, stage_dir)
+                bench_f_files = [Path(f) for f in results.get(2, {}).get("bench_files", []) if f.endswith(".f")]
+                all_fortran = dep_files + bench_f_files
+                results[3] = run_f2c(library_path, all_fortran, stage_dir)
 
             elif stage_num == 4:
                 from .stages.s4_llm_fix_c import fix_c_code
@@ -82,7 +84,10 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                 s3_dir = run_dir / s3_dirs[0].name
                 s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
                 s2_dir = run_dir / s2_dirs[0].name
-                results[4] = fix_c_code(s3_dir, stage_dir, llm, config.max_retries, s2_dir)
+                cg = results.get(1, {}).get("call_graph", {})
+                eps = entry_points
+                results[4] = fix_c_code(s3_dir, stage_dir, llm, config.max_retries, s2_dir,
+                                        call_graph=cg, entry_points=eps)
 
             elif stage_num == 5:
                 from .stages.s5_c2rust import ensure_c2rust, transpile_to_rust
@@ -131,5 +136,12 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
             results[stage_num] = {"error": str(e)}
 
     report_path = run_dir / "report.html"
+    # Try to open reports in VS Code preview (no-op if not in VS Code)
+    import subprocess as _sp
+    try:
+        _sp.run(["code", "--reuse-window", str(report_path)], check=False, timeout=5)
+        _sp.run(["code", "--reuse-window", str(run_dir / "report.md")], check=False, timeout=5)
+    except Exception:
+        pass
     console.print(f"\n[bold green]Pipeline complete![/bold green] Report: [cyan]{report_path}[/cyan]\n")
     return run_dir

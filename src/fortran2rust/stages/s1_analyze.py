@@ -28,7 +28,7 @@ def list_entry_points(source_dir: Path) -> list[str]:
     from fparser.two.utils import walk
 
     names = []
-    for f in sorted(source_dir.glob("*.f")):
+    for f in sorted(f for f in source_dir.glob("*.f") if not f.name.startswith(".")):
         tree = _parse_file(f)
         if tree is None:
             continue
@@ -48,7 +48,7 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
     # Map: function_name (upper) -> set of called function names (upper)
     call_graph: dict[str, set[str]] = {}
 
-    all_files = sorted(source_dir.glob("*.f"))
+    all_files = sorted(f for f in source_dir.glob("*.f") if not f.name.startswith("."))
 
     for f in all_files:
         tree = _parse_file(f)

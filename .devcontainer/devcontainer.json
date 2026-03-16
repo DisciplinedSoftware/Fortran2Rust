@@ -8,7 +8,8 @@
       "extensions": [
         "ms-python.python",
         "rust-lang.rust-analyzer",
-        "ekho.fortran-language-server"
+        "ekho.fortran-language-server",
+        "george-alisson.html-preview-vscode"
       ],
       "settings": {
         "python.defaultInterpreterPath": "/opt/venv/bin/python3"
