@@ -238,8 +238,7 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
         "overall_ok": overall_ok,
     }
 
-    artifacts = _collect_artifacts(run_dir)
-    log.info(f"Collected {len(artifacts)} artifacts")
+    log.info("Rendering reports")
 
     ctx = {
         "run_id": run_id,
