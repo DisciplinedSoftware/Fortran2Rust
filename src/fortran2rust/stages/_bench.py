@@ -198,6 +198,15 @@ def run_rust_benchmarks(
     # Add [[bin]] entries that point directly at each bench_*.rs file.
     # No thin-wrapper is needed — c2rust generates `pub fn main()` for them.
     cargo_content = cargo_toml.read_text()
+    # Ensure rlib is in crate-type so [[bin]] targets can link against the lib.
+    # Without rlib, extern "C" calls to #[no_mangle] functions are unresolved.
+    if 'crate-type' in cargo_content and '"rlib"' not in cargo_content:
+        cargo_content = re.sub(
+            r'(crate-type\s*=\s*\[)',
+            r'\1"rlib", ',
+            cargo_content,
+        )
+        log.info("Added rlib to crate-type so bench binaries can link against the lib")
     for bench_rs in bench_rs_files:
         stem = bench_rs.stem  # e.g. bench_dgemm
         if f'name = "{stem}"' in cargo_content:

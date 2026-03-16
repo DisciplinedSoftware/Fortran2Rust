@@ -17,7 +17,7 @@ edition = "2021"
 
 [lib]
 name = "fortran2rust_output"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["rlib", "cdylib", "staticlib"]
 """
 
 
