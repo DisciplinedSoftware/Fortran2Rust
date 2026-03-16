@@ -75,13 +75,13 @@ def fix_rust_code(
         shutil.copytree(rust_dir, output_dir, dirs_exist_ok=True)
 
     # Patch c2rust extern types before the first build to avoid a wasted LLM retry.
+    # Apply to all .rs files — not just bench_*.rs — because lib files such as xerbla.rs
+    # also contain `#![feature(extern_types)]` and opaque extern type declarations.
     src_dir = output_dir / "src"
-    for bench_rs in sorted(src_dir.glob("bench_*.rs")):
-        _fix_bench_extern_types(bench_rs)
-        log.info(f"Pre-patched extern types in {bench_rs.name}")
     for rs in sorted(src_dir.glob("*.rs")):
+        _fix_bench_extern_types(rs)
         _fix_stable_rust_features(rs)
-        log.info(f"Stripped stable feature flags from {rs.name}")
+        log.info(f"Pre-patched extern types / stable features in {rs.name}")
 
     cargo_toml = output_dir / "Cargo.toml"
     cargo_build_log = output_dir / "cargo_build.log"
@@ -103,7 +103,21 @@ def fix_rust_code(
     for attempt in range(max_retries):
         if build_ok:
             break
-        failing = _get_failing_rust_files(build_output, output_dir)
+        # Exclude pre-generated bench_*.rs files from LLM repair — the LLM does not
+        # understand their structure and tends to corrupt them with explanation text.
+        failing = [
+            f for f in _get_failing_rust_files(build_output, output_dir)
+            if not f.name.startswith("bench_")
+        ]
+        if not failing:
+            # All errors in bench files — re-patch them and retry without LLM
+            for rs in sorted(src_dir.glob("bench_*.rs")):
+                _fix_bench_extern_types(rs)
+            build_ok, build_output = _cargo_build(cargo_toml)
+            build_error = build_output
+            with open(cargo_build_log, "a") as fh:
+                fh.write(f"=== BENCH REPATCH ===\n{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n")
+            continue
         _console.print(
             f"  [yellow]⚠ Rust build failed[/yellow] "
             f"({len(failing)} file(s)): "

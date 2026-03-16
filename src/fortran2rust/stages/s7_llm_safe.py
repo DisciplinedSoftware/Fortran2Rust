@@ -75,13 +75,12 @@ def make_safe(
         shutil.copytree(rust_dir, output_dir, dirs_exist_ok=True)
 
     # Patch c2rust extern types before the first build to avoid a wasted LLM retry.
+    # Apply to all .rs files — not just bench_*.rs.
     src_dir = output_dir / "src"
-    for bench_rs in sorted(src_dir.glob("bench_*.rs")):
-        _fix_bench_extern_types(bench_rs)
-        log.info(f"Pre-patched extern types in {bench_rs.name}")
     for rs in sorted(src_dir.glob("*.rs")):
+        _fix_bench_extern_types(rs)
         _fix_stable_rust_features(rs)
-        log.info(f"Stripped stable feature flags from {rs.name}")
+        log.info(f"Pre-patched extern types / stable features in {rs.name}")
 
     cargo_toml = output_dir / "Cargo.toml"
     cargo_build_log = output_dir / "cargo_build.log"
