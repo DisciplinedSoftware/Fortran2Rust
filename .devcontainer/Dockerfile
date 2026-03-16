@@ -24,3 +24,11 @@ ENV PATH="/home/vscode/.cargo/bin:${PATH}"
 USER root
 # Make cargo available system-wide
 RUN cp -r /home/vscode/.cargo/bin/* /usr/local/bin/ 2>/dev/null || true
+
+# Create a virtual environment for the project (avoids PEP 668 externally-managed error)
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Give vscode user write access to the venv so postCreateCommand can install the package
+RUN chown -R vscode:vscode /opt/venv
