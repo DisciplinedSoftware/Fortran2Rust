@@ -1,9 +1,38 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+from rich.console import Console
+
+_console = Console(stderr=True)
+
+
+@dataclass
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def __str__(self) -> str:
+        return (
+            f"tokens: [bold]{self.prompt_tokens:,}[/bold] in / "
+            f"[bold]{self.completion_tokens:,}[/bold] out "
+            f"([bold]{self.total_tokens:,}[/bold] total)"
+        )
 
 
 class LLMClient(ABC):
+    def __init__(self) -> None:
+        self.last_usage: TokenUsage = TokenUsage()
+
+    def _record_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
+        self.last_usage = TokenUsage(prompt_tokens, completion_tokens)
+        _console.print(f"  [dim]↳ {self.last_usage}[/dim]")
+
     @abstractmethod
     def complete(self, system: str, user: str) -> str:
         """Send a chat completion and return the assistant's text."""
