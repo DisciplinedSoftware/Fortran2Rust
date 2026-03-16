@@ -84,10 +84,15 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
 
                 elif stage_num == 3:
                     from .stages.s3_f2c import run_f2c
+                    import shutil as _shutil
                     dep_files = [Path(f) for f in results.get(1, {}).get("files", [])]
-                    bench_f_files = [Path(f) for f in results.get(2, {}).get("bench_files", []) if f.endswith(".f")]
-                    all_fortran = dep_files + bench_f_files
-                    results[3] = run_f2c(library_path, all_fortran, stage_dir, status_fn=status_fn)
+                    # Benchmark .f files use modern Fortran (Fortran 90/2003) which f2c cannot handle.
+                    # C benchmark drivers were generated directly in stage 2 — copy them into stage 3.
+                    bench_c_files = [Path(f) for f in results.get(2, {}).get("bench_c_files", [])]
+                    for bc in bench_c_files:
+                        if bc.exists():
+                            _shutil.copy(bc, stage_dir / bc.name)
+                    results[3] = run_f2c(library_path, dep_files, stage_dir, status_fn=status_fn)
 
                 elif stage_num == 4:
                     from .stages.s4_llm_fix_c import fix_c_code

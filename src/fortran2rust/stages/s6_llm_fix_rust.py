@@ -7,8 +7,21 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.console import Console
+
 if TYPE_CHECKING:
     from ..llm.base import LLMClient
+
+from ..exceptions import CompilationError, MaxRetriesExceededError
+
+_console = Console(stderr=True)
+
+
+def _first_error_line(error: str) -> str:
+    for line in error.splitlines():
+        if "error" in line.lower() and line.strip():
+            return line.strip()[:120]
+    return error.strip()[:120]
 
 
 def _read_rust_files(directory: Path) -> str:

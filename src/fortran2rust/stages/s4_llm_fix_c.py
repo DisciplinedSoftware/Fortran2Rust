@@ -8,9 +8,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from rich.console import Console
 
 if TYPE_CHECKING:
     from ..llm.base import LLMClient
+
+from ..exceptions import CompilationError, MaxRetriesExceededError, NumericalPrecisionError, BenchmarkRuntimeError
+
+_console = Console(stderr=True)
+
+
+def _first_error_line(error: str) -> str:
+    """Extract the first meaningful error line for display."""
+    for line in error.splitlines():
+        if "error" in line.lower() and line.strip():
+            return line.strip()[:120]
+    return error.strip()[:120]
 
 
 def _topological_sort(entry_points: list[str], call_graph: dict[str, list[str]]) -> list[str]:
@@ -145,8 +158,11 @@ def fix_c_code(
     attempt = 0
     while not compile_ok and attempt < max_retries:
         failing_files = _get_failing_files(compile_error, output_dir)
-        # Process the first failing file (fix one at a time)
         target = failing_files[0]
+        _console.print(
+            f"  [yellow]⚠ C compilation failed[/yellow] in [bold]{target.name}[/bold]: "
+            f"[dim]{_first_error_line(compile_error)}[/dim]"
+        )
         llm_log.append({
             "phase": "compile", "attempt": attempt,
             "target_file": target.name,
@@ -160,8 +176,12 @@ def fix_c_code(
         compile_ok, compile_error = _compile_c(output_dir)
         attempt += 1
 
-    if compile_ok and status_fn:
-        status_fn("Compilation successful")
+    if not compile_ok:
+        exc = CompilationError("C", compile_error[:500])
+        raise MaxRetriesExceededError("Stage 4 (fix C)", exc)
+
+    if status_fn:
+        status_fn("C compilation successful")
 
     # ── Benchmark loop ────────────────────────────────────────────────────────
     bench_ok = False
@@ -192,7 +212,17 @@ def fix_c_code(
                             break
                         max_abs = float(np.max(np.abs(c_data - f_data))) if c_data.shape == f_data.shape else float("inf")
                         bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs}
+                        _console.print(
+                            f"  [yellow]⚠ Numerical precision failed[/yellow] for [bold]{fn_name}[/bold]: "
+                            f"max diff = [bold]{max_abs:.3e}[/bold]"
+                        )
                         err = f"Numerical mismatch: max_abs_diff={max_abs:.6e}"
+                    else:
+                        if not ok:
+                            _console.print(
+                                f"  [yellow]⚠ C benchmark failed to run[/yellow] for [bold]{fn_name}[/bold]: "
+                                f"[dim]{_first_error_line(err)}[/dim]"
+                            )
                     llm_log.append({
                         "phase": "bench", "fn": fn_name, "attempt": b_attempt, "error": err[:300],
                     })
@@ -204,6 +234,15 @@ def fix_c_code(
                     ok, err, c_bin = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
                 else:
                     all_passed = False
+                    # Report what went wrong on final failure
+                    last = bench_results.get(fn_name, {})
+                    if last.get("max_abs_diff", 0) > 0:
+                        exc = NumericalPrecisionError(fn_name, last["max_abs_diff"])
+                    elif not ok:
+                        exc = BenchmarkRuntimeError(fn_name, err[:200])
+                    else:
+                        exc = BenchmarkRuntimeError(fn_name, "unknown failure")
+                    raise MaxRetriesExceededError("Stage 4 (benchmark)", exc)
             bench_ok = all_passed
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
