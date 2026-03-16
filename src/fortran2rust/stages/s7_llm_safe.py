@@ -23,6 +23,7 @@ from ._bench import (
     print_bench_summary,
     run_rust_benchmarks,
 )
+from ._llm_cleanup import compact_rust_for_llm, restore_rust_after_llm, strip_markdown_fences
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -55,7 +56,7 @@ def _count_unsafe(content: str) -> int:
 
 
 def _apply_llm_response(response: str, target_file: Path) -> None:
-    content = re.sub(r"```[a-z]*\n?", "", response).strip()
+    content = strip_markdown_fences(response)
     target_file.write_text(content + "\n")
 
 
@@ -110,13 +111,22 @@ def make_safe(
         def _rewrite(args: tuple) -> tuple:
             rs_file, n = args
             log.info(f"LLM removing {n} unsafe block(s) from {rs_file.name}")
-            return rs_file, n, llm.complete(SAFE_SYSTEM_PROMPT, rs_file.read_text())
+            original = rs_file.read_text()
+            compact_code, preserved_prefix = compact_rust_for_llm(original)
+            prompt = (
+                SAFE_SYSTEM_PROMPT.replace(
+                    "Return ONLY the complete corrected file, no explanations, no markdown fences.",
+                    "Leading comments were removed before sending to reduce token usage. Return ONLY the complete corrected file, no explanations, no markdown fences.",
+                )
+            )
+            return rs_file, n, llm.complete(prompt, compact_code), preserved_prefix
 
         with ThreadPoolExecutor(max_workers=len(files_to_process)) as executor:
             rewrites = list(executor.map(_rewrite, files_to_process))
 
-        for rs_file, n, response in rewrites:
+        for rs_file, n, response, preserved_prefix in rewrites:
             _apply_llm_response(response, rs_file)
+            rs_file.write_text(restore_rust_after_llm(rs_file.read_text(), preserved_prefix) + "\n")
             _fix_stable_rust_features(rs_file)
             llm_log.append({"phase": "safe", "file": str(rs_file.name), "unsafe_count": n})
             llm_turns += 1
@@ -165,18 +175,24 @@ def make_safe(
             )
 
             def _repair(rs_file: Path) -> tuple:
+                original = rs_file.read_text()
+                compact_code, preserved_prefix = compact_rust_for_llm(original)
                 return rs_file, llm.repair(
-                    context="Fix compilation error after removing unsafe blocks in Rust code.",
+                    context=(
+                        "Fix compilation error after removing unsafe blocks in Rust code. "
+                        "Leading comments were removed before sending to reduce token usage."
+                    ),
                     error=build_output,
-                    code=rs_file.read_text(),
+                    code=compact_code,
                     attempt=attempt,
-                )
+                ), preserved_prefix
 
             with ThreadPoolExecutor(max_workers=len(failing)) as executor:
                 repairs = list(executor.map(_repair, failing))
 
-            for rs_file, response in repairs:
+            for rs_file, response, preserved_prefix in repairs:
                 _apply_llm_response(response, rs_file)
+                rs_file.write_text(restore_rust_after_llm(rs_file.read_text(), preserved_prefix) + "\n")
                 _fix_stable_rust_features(rs_file)
                 llm_log.append({"phase": "safe_repair", "attempt": attempt, "error": build_output})
                 llm_turns += 1

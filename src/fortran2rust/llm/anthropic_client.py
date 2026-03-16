@@ -6,10 +6,11 @@ from .base import LLMClient
 
 
 class AnthropicClient(LLMClient):
-    def __init__(self, api_key: str, model: str = "claude-opus-4-5"):
+    def __init__(self, api_key: str, model: str = "claude-opus-4-5", max_tokens: int = 16384):
         super().__init__()
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
+        self.max_tokens = max_tokens
 
     def _call_llm(self, system: str, user: str) -> str:
         # Mark the system prompt for server-side caching. Anthropic applies the
@@ -18,7 +19,7 @@ class AnthropicClient(LLMClient):
         # this is safe to include unconditionally.
         msg = self.client.messages.create(
             model=self.model,
-            max_tokens=8192,
+            max_tokens=self.max_tokens,
             system=[
                 {
                     "type": "text",

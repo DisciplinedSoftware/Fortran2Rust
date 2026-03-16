@@ -23,6 +23,7 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
     llm = get_llm_client(
         provider=config.llm_provider,
         model=config.llm_model,
+        llm_max_tokens=config.llm_max_tokens,
         openai_api_key=config.openai_api_key,
         anthropic_api_key=config.anthropic_api_key,
         google_api_key=config.google_api_key,

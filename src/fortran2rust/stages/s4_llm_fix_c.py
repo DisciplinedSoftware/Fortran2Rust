@@ -374,20 +374,131 @@ def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset
     return True, "", c_bin if c_bin.exists() else None, c_time_ms
 
 
+_C_CODE_LINE_RE = re.compile(
+    r"^(#\s*include\b|/\*|//|typedef\b|extern\b|static\b|struct\b|union\b|enum\b|"
+    r"(void|int|char|double|float|long|short|signed|unsigned|integer|doublereal|real|"
+    r"logical|ftnlen)\b)"
+)
+
+
+def _looks_like_c_code(content: str) -> bool:
+    return bool(
+        re.search(
+            r"#\s*include\b|;\s*$|\{\s*$|\breturn\b|\bstatic\b|\bextern\b|\btypedef\b",
+            content,
+            flags=re.MULTILINE,
+        )
+    )
+
+
+def _extract_c_from_llm_response(response: str) -> str:
+    text = (response or "").strip()
+    if not text:
+        return ""
+
+    fenced_blocks = re.findall(r"```(?:c|C)?\s*\n(.*?)```", text, flags=re.DOTALL)
+    if not fenced_blocks:
+        fenced_blocks = re.findall(r"```[^\n`]*\n(.*?)```", text, flags=re.DOTALL)
+    candidate = max(fenced_blocks, key=len).strip() if fenced_blocks else text
+
+    lines = candidate.splitlines()
+    start_idx = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _C_CODE_LINE_RE.match(stripped):
+            start_idx = i
+            break
+    if start_idx > 0:
+        candidate = "\n".join(lines[start_idx:])
+
+    candidate = re.sub(r"\n?```\s*$", "", candidate.strip())
+    return candidate.strip()
+
+
+def _compact_c_for_llm(code: str) -> tuple[str, str]:
+    lines = code.splitlines()
+    banner_lines: list[str] = []
+    body_start = 0
+    in_banner_comment = False
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if in_banner_comment:
+            banner_lines.append(line)
+            if "*/" in stripped:
+                in_banner_comment = False
+            body_start = i + 1
+            continue
+        if not stripped:
+            banner_lines.append(line)
+            body_start = i + 1
+            continue
+        if stripped.startswith("/*"):
+            banner_lines.append(line)
+            body_start = i + 1
+            if "*/" not in stripped:
+                in_banner_comment = True
+            continue
+        break
+
+    compact_lines: list[str] = []
+    in_block_comment = False
+    previous_blank = False
+    for line in lines[body_start:]:
+        stripped = line.strip()
+        if in_block_comment:
+            if "*/" in stripped:
+                in_block_comment = False
+            continue
+        if stripped.startswith("/*"):
+            if "*/" not in stripped:
+                in_block_comment = True
+            continue
+        if stripped.startswith("//"):
+            continue
+        if not stripped:
+            if not previous_blank and compact_lines:
+                compact_lines.append("")
+            previous_blank = True
+            continue
+        compact_lines.append(line.rstrip())
+        previous_blank = False
+
+    compact_code = "\n".join(compact_lines).strip()
+    preserved_banner = "\n".join(banner_lines).strip()
+    return compact_code, preserved_banner
+
+
+def _restore_c_after_llm(content: str, preserved_banner: str) -> str:
+    restored = content.strip()
+    if not preserved_banner:
+        return restored
+    if restored.startswith("/*"):
+        return restored
+    return f"{preserved_banner}\n\n{restored}".strip()
+
+
 def _repair_file(llm: "LLMClient", failing_file: Path, error: str, attempt: int = 0) -> None:
     """Ask LLM to fix one specific file and write it back."""
+    original = failing_file.read_text()
+    compact_code, preserved_banner = _compact_c_for_llm(original)
     response = llm.repair(
         context=(
             "Fix this C file produced by the f2c Fortran-to-C transpiler. "
+            "Leading documentation comments were removed before sending to reduce token usage. "
             "Return ONLY the complete corrected C file contents, no explanation."
         ),
         error=error,
-        code=failing_file.read_text(),
+        code=compact_code,
         attempt=attempt,
     )
-    # Strip markdown fences if present
-    content = re.sub(r"^```[a-z]*\n?", "", response.strip(), flags=re.MULTILINE)
-    content = re.sub(r"\n?```$", "", content.strip())
+    content = _extract_c_from_llm_response(response)
+    if not _looks_like_c_code(content):
+        content = original
+    else:
+        content = _restore_c_after_llm(content, preserved_banner)
     failing_file.write_text(content.strip() + "\n")
 
 
@@ -407,8 +518,9 @@ def _generate_c_from_fortran(llm: "LLMClient", f_file: Path, output_dir: Path) -
         error="f2c could not convert this file (likely uses Fortran 90+ features like LEN_TRIM).",
         code=f_file.read_text(),
     )
-    content = re.sub(r"^```[a-z]*\n?", "", response.strip(), flags=re.MULTILINE)
-    content = re.sub(r"\n?```$", "", content.strip())
+    content = _extract_c_from_llm_response(response)
+    if not _looks_like_c_code(content):
+        raise CompilationError("C", "LLM conversion did not return recognizable C code")
     c_path.write_text(content.strip() + "\n")
     return c_path
 

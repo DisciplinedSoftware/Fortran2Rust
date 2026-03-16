@@ -9,7 +9,11 @@ def get_llm_client(provider: str, model: str, **keys) -> LLMClient:
         return OpenAIClient(api_key=keys["openai_api_key"], model=model)
     elif provider == "anthropic":
         from .anthropic_client import AnthropicClient
-        return AnthropicClient(api_key=keys["anthropic_api_key"], model=model)
+        return AnthropicClient(
+            api_key=keys["anthropic_api_key"],
+            model=model,
+            max_tokens=keys.get("llm_max_tokens", 16384),
+        )
     elif provider == "google":
         from .google_client import GoogleClient
         return GoogleClient(api_key=keys["google_api_key"], model=model)

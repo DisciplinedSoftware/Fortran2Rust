@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
 from ._bench import _fix_bench_extern_types, _fix_stable_rust_features, _get_failing_rust_files, print_bench_summary, run_rust_benchmarks
+from ._llm_cleanup import compact_rust_for_llm, restore_rust_files_after_llm, split_llm_file_response, strip_markdown_fences
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -27,27 +28,25 @@ def _first_error_line(error: str) -> str:
     return error.strip()[:120]
 
 
-def _apply_llm_response(response: str, output_dir: Path) -> None:
-    parts = re.split(r"^---\s+(\S+\.(?:rs|toml))\s+---$", response, flags=re.MULTILINE)
-    if len(parts) >= 3:
-        it = iter(parts[1:])
-        for filename, content in zip(it, it):
+def _apply_llm_response(
+    response: str,
+    output_dir: Path,
+    default_target: Path,
+    preserved_prefixes: dict[Path, str],
+) -> None:
+    written_files: list[Path] = []
+    file_updates = split_llm_file_response(response, (".rs", ".toml"))
+    if file_updates:
+        for filename, content in file_updates:
             target = output_dir / filename
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(_strip_fences(content) + "\n")
+            target.write_text(content + "\n")
+            written_files.append(target)
     else:
-        content = _strip_fences(response)
-        rs_files = sorted(output_dir.rglob("*.rs"))
-        target = rs_files[0] if rs_files else output_dir / "src" / "lib.rs"
-        target.write_text(content + "\n")
+        default_target.write_text(strip_markdown_fences(response) + "\n")
+        written_files.append(default_target)
 
-
-def _strip_fences(content: str) -> str:
-    """Strip markdown code fences from LLM output (handles ``` ```rust, ```Rust, etc.)."""
-    content = re.sub(r"^```[a-zA-Z0-9]*\s*\n?", "", content.strip())
-    content = re.sub(r"\n?```\s*$", "", content)
-    return content.strip()
-
+    restore_rust_files_after_llm(written_files, preserved_prefixes)
 
 def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
     result = subprocess.run(
@@ -131,23 +130,26 @@ def fix_rust_code(
         log.info(f"LLM repair attempt {attempt+1}/{max_retries}: {[f.name for f in failing]}")
 
         def _repair(rs_file: Path) -> tuple:
-            code = rs_file.read_text()
+            original = rs_file.read_text()
+            compact_code, preserved_prefix = compact_rust_for_llm(original)
             response = llm.repair(
                 context=(
                     "Fix this Rust file that was transpiled from C by c2rust. "
+                    "Leading comments were removed before sending to reduce token usage. "
                     "Fix all compilation errors shown."
                 ),
                 error=build_output,
-                code=code,
+                code=compact_code,
                 attempt=attempt,
             )
-            return rs_file, response
+            return rs_file, response, preserved_prefix
 
         with ThreadPoolExecutor(max_workers=len(failing)) as executor:
             repairs = list(executor.map(_repair, failing))
 
-        for rs_file, response in repairs:
-            _apply_llm_response(response, output_dir)
+        for rs_file, response, preserved_prefix in repairs:
+            preserved_prefixes = {rs_file.resolve(): preserved_prefix}
+            _apply_llm_response(response, output_dir, rs_file, preserved_prefixes)
             llm_log.append({"phase": "build", "attempt": attempt, "file": rs_file.name, "error": build_output})
             llm_turns += 1
             retries += 1

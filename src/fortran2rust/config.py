@@ -17,6 +17,7 @@ PROVIDERS = ["openai", "anthropic", "google", "openrouter", "ollama"]
 class Config:
     llm_provider: str = "openai"
     llm_model: str = "gpt-4o"
+    llm_max_tokens: int = 16384
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     google_api_key: str = ""
@@ -32,6 +33,7 @@ def load_config(**overrides) -> Config:
     cfg = Config(
         llm_provider=os.getenv("LLM_PROVIDER", "openai"),
         llm_model=os.getenv("LLM_MODEL", "gpt-4o"),
+        llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "16384")),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),
