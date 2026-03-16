@@ -44,6 +44,11 @@ def main():
         help="Stages to run, e.g. '1-9' or '1,3,5' (default: 1-9)",
     )
     parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Skip LLM stages 7 (make safe) and 8 (make idiomatic) to reduce token usage",
+    )
+    parser.add_argument(
         "--max-retries",
         type=int,
         default=5,
@@ -85,7 +90,7 @@ def _run_non_interactive(args):
 
     overrides = {
         "max_retries": args.max_retries,
-        "stages": parse_stages(args.stages),
+        "stages": [s for s in parse_stages(args.stages) if not args.quick or s not in (7, 8)],
         "output_dir": Path(args.output_dir),
     }
     if args.llm_provider:
