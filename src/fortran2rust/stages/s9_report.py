@@ -62,23 +62,6 @@ tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
-{% if perf_table %}
-<div class="card">
-  <h2>Performance Comparison</h2>
-  <table>
-    <tr><th>Function</th><th>Fortran (ms)</th><th>Rust (ms)</th><th>Speedup</th></tr>
-    {% for row in perf_table %}
-    <tr>
-      <td>{{ row.function }}</td>
-      <td>{{ "%.4f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }}</td>
-      <td>{{ "%.4f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }}</td>
-      <td>{% if row.speedup is not none %}<span class="perf-ratio">{{ "%.2fx" | format(row.speedup) }}</span>{% else %}N/A{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
-{% endif %}
-
 {% if precision_table %}
 <div class="card">
   <h2>Numerical Precision</h2>
@@ -90,6 +73,23 @@ tr:last-child td { border-bottom: none; }
       <td>{{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }}</td>
       <td>{{ "%.2e" | format(row.max_rel_diff) if row.max_rel_diff is not none else "N/A" }}</td>
       <td><span class="{{ 'status-pass' if row.ok else 'status-fail' }}">{{ 'PASS' if row.ok else 'FAIL' }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if perf_table %}
+<div class="card">
+  <h2>Performance Comparison</h2>
+  <table>
+    <tr><th>Function</th><th>Fortran (ms)</th><th>Rust (ms)</th><th>Speedup</th></tr>
+    {% for row in perf_table %}
+    <tr>
+      <td>{{ row.function }}</td>
+      <td>{{ "%.4f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }}</td>
+      <td>{{ "%.4f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }}</td>
+      <td>{% if row.speedup is not none %}<span class="perf-ratio">{{ "%.2fx" | format(row.speedup) }}</span>{% else %}N/A{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
@@ -129,21 +129,21 @@ MD_TEMPLATE = """# Fortran2Rust Pipeline Report
 | LLM Turns Used | {{ summary.llm_turns_total }} |
 | Overall Status | {{ 'PASS' if summary.overall_ok else 'FAIL' }} |
 
-{% if perf_table %}
-## Performance Comparison
-
-| Function | Fortran (ms) | Rust (ms) | Speedup |
-|----------|-------------|-----------|---------|
-{% for row in perf_table %}| {{ row.function }} | {{ "%.4f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.4f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.speedup) if row.speedup is not none else "N/A" }} |
-{% endfor %}
-{% endif %}
-
 {% if precision_table %}
 ## Numerical Precision
 
 | Function | Max Abs Diff | Max Rel Diff | Status |
 |----------|-------------|-------------|--------|
 {% for row in precision_table %}| {{ row.function }} | {{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }} | {{ "%.2e" | format(row.max_rel_diff) if row.max_rel_diff is not none else "N/A" }} | {{ 'PASS' if row.ok else 'FAIL' }} |
+{% endfor %}
+{% endif %}
+
+{% if perf_table %}
+## Performance Comparison
+
+| Function | Fortran (ms) | Rust (ms) | Speedup |
+|----------|-------------|-----------|---------|
+{% for row in perf_table %}| {{ row.function }} | {{ "%.4f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.4f" | format(row.rust_ms) if row.rust_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.speedup) if row.speedup is not none else "N/A" }} |
 {% endfor %}
 {% endif %}
 

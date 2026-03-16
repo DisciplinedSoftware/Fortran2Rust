@@ -204,12 +204,10 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                 results[stage_num] = {"error": str(e)}
 
     report_path = run_dir / "report.html"
-    # Only open preview if stage 9 actually ran and produced the report
     if report_path.exists():
         import subprocess as _sp
         try:
-            _sp.run(["code", "--reuse-window", str(report_path)], check=False, timeout=5)
-            _sp.run(["code", "--reuse-window", str(run_dir / "report.md")], check=False, timeout=5)
+            _sp.run(["xdg-open", str(report_path)], check=False, timeout=5)
         except Exception:
             pass
     console.print(f"\n[bold green]Pipeline complete![/bold green] Report: [cyan]{report_path}[/cyan]\n")
