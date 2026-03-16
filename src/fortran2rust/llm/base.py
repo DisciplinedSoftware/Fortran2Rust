@@ -86,7 +86,14 @@ class LLMClient(ABC):
         *attempt* is zero-indexed; when > 0 a hint is added to the prompt
         telling the model that previous attempts failed so it should try a
         different approach.
+
+        Responses for attempt 0 are stored in a disk cache keyed on
+        (code, error, context).  On subsequent pipeline runs the cache is
+        consulted first, skipping the LLM call entirely when an identical
+        repair request is encountered.
         """
+        from ..repair_cache import lookup, store
+
         system = (
             "You are an expert systems programmer. You will be given code and an error. "
             "Return ONLY the corrected complete file(s), no explanations, no markdown fences."
@@ -99,4 +106,27 @@ class LLMClient(ABC):
                 f"\n\nNOTE: {attempt} previous attempt(s) failed to fix this. "
                 "Try a different approach and be more thorough."
             )
-        return self.complete(system, user)
+
+        # Only cache first-attempt responses: later attempts deliberately use
+        # different strategies so their outputs should not be replayed.
+        if attempt == 0:
+            cached = lookup(code, error, context)
+            if cached is not None:
+                _console.print("  [dim]↳ repair cache hit — skipped LLM call[/dim]")
+                with self._log_lock:
+                    self._conversation_log.append({
+                        "system": system,
+                        "user": user,
+                        "response": cached,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "cache_hit": True,
+                    })
+                return cached
+
+        response = self.complete(system, user)
+
+        if attempt == 0:
+            store(code, error, context, response)
+
+        return response
