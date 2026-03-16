@@ -4,6 +4,10 @@ import re
 from pathlib import Path
 
 
+_MAX_ERROR_CHARS = 3500
+_MAX_ERROR_LINES = 120
+
+
 def strip_markdown_fences(content: str) -> str:
     content = re.sub(r"^```[a-zA-Z0-9_+-]*\s*\n?", "", content.strip())
     content = re.sub(r"\n?```\s*$", "", content)
@@ -99,6 +103,29 @@ def restore_rust_files_after_llm(
         target.write_text(restore_rust_after_llm(content, preserved_prefix) + "\n")
 
 
+def _truncate_llm_error_payload(error_text: str) -> str:
+    """Cap error payload size to avoid LLM request-body limits."""
+    if not error_text:
+        return error_text
+
+    lines = error_text.splitlines()
+    if len(lines) > _MAX_ERROR_LINES:
+        omitted = len(lines) - _MAX_ERROR_LINES
+        error_text = "\n".join(lines[:_MAX_ERROR_LINES])
+        error_text += f"\n[... {omitted} more error lines truncated ...]"
+
+    if len(error_text) > _MAX_ERROR_CHARS:
+        head_len = _MAX_ERROR_CHARS // 2
+        tail_len = _MAX_ERROR_CHARS - head_len
+        error_text = (
+            error_text[:head_len]
+            + "\n[... oversized error payload truncated ...]\n"
+            + error_text[-tail_len:]
+        )
+
+    return error_text
+
+
 def filter_errors_for_file(build_output: str, filename: str) -> str:
     """Return only the cargo/gcc error blocks that reference *filename*.
 
@@ -132,8 +159,8 @@ def filter_errors_for_file(build_output: str, filename: str) -> str:
             result = "\n".join(matching)
             if omitted:
                 result += f"\n[{omitted} error block(s) from other files omitted]\n"
-            return result
-        return build_output
+            return _truncate_llm_error_payload(result)
+        return _truncate_llm_error_payload(build_output)
 
     # ── GCC / Clang (C) format ─────────────────────────────────────────
     # Errors are line-prefixed:  filename.c:line:col: error: ...
@@ -150,10 +177,11 @@ def filter_errors_for_file(build_output: str, filename: str) -> str:
         else:
             in_block = False
 
-    return "".join(relevant) if relevant else build_output
+    filtered = "".join(relevant) if relevant else build_output
+    return _truncate_llm_error_payload(filtered)
 
 
-_BATCH_SIZE = 4
+_BATCH_SIZE = 2
 
 
 def batch_repair_files(

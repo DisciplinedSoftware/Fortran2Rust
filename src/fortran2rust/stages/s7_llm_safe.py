@@ -27,6 +27,7 @@ from ._llm_cleanup import batch_repair_files, compact_rust_for_llm, filter_error
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
+_MAX_LLM_RUST_CHARS = 16000
 
 SAFE_SYSTEM_PROMPT = (
     "You are a Rust expert. Rewrite this code to eliminate all unsafe blocks while preserving "
@@ -39,6 +40,11 @@ def _first_error_line(error: str) -> str:
         if "error" in line.lower() and line.strip():
             return line.strip()[:120]
     return error.strip()[:120]
+
+
+def _llm_eligible_rust_file(rs_file: Path) -> bool:
+    compact_code, _ = compact_rust_for_llm(rs_file.read_text())
+    return len(compact_code) <= _MAX_LLM_RUST_CHARS
 
 
 def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
@@ -100,6 +106,14 @@ def make_safe(
 
     files_to_process = [(f, _count_unsafe(f.read_text())) for f in rs_files]
     files_to_process = [(f, n) for f, n in files_to_process if n > 0]
+    skipped_large = [f for f, _ in files_to_process if not _llm_eligible_rust_file(f)]
+    files_to_process = [(f, n) for f, n in files_to_process if _llm_eligible_rust_file(f)]
+
+    if skipped_large:
+        log.warning(
+            "Skipping LLM unsafe rewrite for oversized file(s): %s",
+            ", ".join(f.name for f in skipped_large),
+        )
 
     if files_to_process:
         if status_fn:
@@ -144,12 +158,16 @@ def make_safe(
             if build_ok:
                 break
 
-            failing = _get_failing_rust_files(build_output, output_dir)
+            failing = [f for f in _get_failing_rust_files(build_output, output_dir) if _llm_eligible_rust_file(f)]
             _console.print(
                 f"  [yellow]⚠ Safe Rust build failed[/yellow] "
                 f"({len(failing)} file(s)): "
                 f"[dim]{_first_error_line(build_output)}[/dim]"
             )
+
+            if not failing:
+                log.warning("No LLM-eligible failing files (oversized prompt candidates); skipping repair loop")
+                break
 
             # Deterministic dedup fix first (no LLM cost)
             dedup_fixed = any(_fix_duplicate_no_mangle(f, build_output) for f in failing)

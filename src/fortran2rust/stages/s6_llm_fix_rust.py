@@ -18,6 +18,7 @@ from ._llm_cleanup import batch_repair_files, compact_rust_for_llm, filter_error
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
+_MAX_LLM_RUST_CHARS = 16000
 
 
 def _first_error_line(error: str) -> str:
@@ -25,6 +26,11 @@ def _first_error_line(error: str) -> str:
         if "error" in line.lower() and line.strip():
             return line.strip()[:120]
     return error.strip()[:120]
+
+
+def _llm_eligible_rust_file(rs_file: Path) -> bool:
+    compact_code, _ = compact_rust_for_llm(rs_file.read_text())
+    return len(compact_code) <= _MAX_LLM_RUST_CHARS
 
 
 def _apply_llm_response(
@@ -107,6 +113,14 @@ def fix_rust_code(
             f for f in _get_failing_rust_files(build_output, output_dir)
             if not f.name.startswith("bench_")
         ]
+        oversized = [f for f in failing if not _llm_eligible_rust_file(f)]
+        failing = [f for f in failing if _llm_eligible_rust_file(f)]
+
+        if oversized:
+            log.warning(
+                "Skipping LLM repair for oversized file(s): %s",
+                ", ".join(f.name for f in oversized),
+            )
         if not failing:
             # All errors in bench files — re-patch them and retry without LLM
             for rs in sorted(src_dir.glob("bench_*.rs")):

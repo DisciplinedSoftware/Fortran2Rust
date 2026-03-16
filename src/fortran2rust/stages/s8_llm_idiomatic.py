@@ -25,6 +25,7 @@ from ._llm_cleanup import batch_repair_files, compact_rust_for_llm, filter_error
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
+_MAX_LLM_RUST_CHARS = 16000
 
 _MAX_BENCH_SLOWDOWN_RATIO = 1.5
 _MIN_REGRESSION_MS = 5.0
@@ -43,6 +44,11 @@ def _first_error_line(error: str) -> str:
         if "error" in line.lower() and line.strip():
             return line.strip()[:120]
     return error.strip()[:120]
+
+
+def _llm_eligible_rust_file(rs_file: Path) -> bool:
+    compact_code, _ = compact_rust_for_llm(rs_file.read_text())
+    return len(compact_code) <= _MAX_LLM_RUST_CHARS
 
 
 def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
@@ -124,6 +130,15 @@ def make_idiomatic(
         f for f in output_dir.rglob("*.rs")
         if "bench" not in f.name and "test" not in f.name and f.name != "lib.rs"
     ]
+    skipped_large = [f for f in rs_files if not _llm_eligible_rust_file(f)]
+    rs_files = [f for f in rs_files if _llm_eligible_rust_file(f)]
+
+    if skipped_large:
+        log.warning(
+            "Skipping LLM idiomatic rewrite for oversized file(s): %s",
+            ", ".join(f.name for f in skipped_large),
+        )
+
     log.info(f"Processing {len(rs_files)} Rust files")
 
     if rs_files:
@@ -164,12 +179,16 @@ def make_idiomatic(
             if build_ok:
                 break
 
-            failing = _get_failing_rust_files(build_output, output_dir)
+            failing = [f for f in _get_failing_rust_files(build_output, output_dir) if _llm_eligible_rust_file(f)]
             _console.print(
                 f"  [yellow]⚠ Idiomatic Rust build failed[/yellow] "
                 f"({len(failing)} file(s)): "
                 f"[dim]{_first_error_line(build_output)}[/dim]"
             )
+
+            if not failing:
+                log.warning("No LLM-eligible failing files (oversized prompt candidates); skipping repair loop")
+                break
 
             # Deterministic dedup fix first (no LLM cost)
             dedup_fixed = any(_fix_duplicate_no_mangle(f, build_output) for f in failing)
