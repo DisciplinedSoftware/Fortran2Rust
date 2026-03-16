@@ -167,9 +167,12 @@ def _fix_bench_extern_types(bench_rs: Path) -> None:
 
     text = re.sub(r"#!\[feature\(([^)]*)\)\]", _strip, text)
 
-    # Insert stable defs right after the last ``#![...]`` crate attribute
+    # Insert stable defs right after the last ``#![...]`` crate attribute.
+    # The pattern handles both single-line (``#![feature(foo)]``) and
+    # multi-line (``#![allow(\n    dead_code,\n    …\n)]``) inner attributes
+    # so that the struct definitions are never inserted before the allow block.
     last_end = 0
-    for m in re.finditer(r"^#!\[.*\]\n", text, re.MULTILINE):
+    for m in re.finditer(r"^#!\[[\s\S]*?\]\s*\n", text, re.MULTILINE):
         last_end = m.end()
     text = text[:last_end] + stable_defs + "\n" + text[last_end:]
 
