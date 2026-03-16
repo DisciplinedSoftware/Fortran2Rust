@@ -17,6 +17,30 @@ _console = Console(stderr=True)
 _CRATE_NAME = "fortran2rust_output"
 
 
+def _get_failing_rust_files(error: str, workspace_dir: Path) -> list[Path]:
+    """Parse ``cargo build`` stderr to find source files that contain errors.
+
+    Rust error messages contain lines like::
+
+        error[E0412]: cannot find type ...
+          --> src/dgemm.rs:42:27
+
+    Paths are relative to the workspace root (*workspace_dir*).  Returns a
+    deduplicated list of existing ``Path`` objects, or all ``.rs`` files in
+    *workspace_dir* when no specific files can be identified.
+    """
+    found: list[Path] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"-->\s+(\S+\.rs):", error):
+        rel = match.group(1)
+        if rel not in seen:
+            seen.add(rel)
+            candidate = (workspace_dir / rel).resolve()
+            if candidate.exists():
+                found.append(candidate)
+    return found if found else list(workspace_dir.rglob("*.rs"))
+
+
 # Features that c2rust emits but that have since been stabilised.
 # Keeping them on a stable toolchain raises E0554.
 _STABLE_FEATURES: frozenset[str] = frozenset({"raw_ref_op"})

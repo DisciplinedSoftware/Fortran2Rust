@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,13 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
-from ._bench import _fix_duplicate_no_mangle, _fix_stable_rust_features, print_bench_summary, run_rust_benchmarks
+from ._bench import (
+    _fix_duplicate_no_mangle,
+    _fix_stable_rust_features,
+    _get_failing_rust_files,
+    print_bench_summary,
+    run_rust_benchmarks,
+)
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -45,9 +52,7 @@ def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
 
 
 def _apply_llm_response(response: str, target_file: Path) -> None:
-    content = re.sub(r"^```[a-zA-Z0-9]*\s*\n?", "", response.strip())
-    content = re.sub(r"\n?```\s*$", "", content)
-    content = content.strip()
+    content = re.sub(r"```[a-z]*\n?", "", response).strip()
     target_file.write_text(content + "\n")
 
 
@@ -72,71 +77,103 @@ def make_idiomatic(
     llm_turns = 0
     retries = 0
 
-    rs_files = [f for f in output_dir.rglob("*.rs") if "bench" not in f.name and "test" not in f.name and f.name != "lib.rs"]
+    rs_files = [
+        f for f in output_dir.rglob("*.rs")
+        if "bench" not in f.name and "test" not in f.name and f.name != "lib.rs"
+    ]
     log.info(f"Processing {len(rs_files)} Rust files")
 
-    for rs_file in rs_files:
-        content = rs_file.read_text()
+    if rs_files:
         if status_fn:
-            status_fn(f"LLM: making {rs_file.name} idiomatic…")
-        log.info(f"LLM idiomatic rewrite of {rs_file.name}")
-        response = llm.complete(IDIOMATIC_SYSTEM_PROMPT, content)
-        llm_log.append({"phase": "idiomatic", "file": rs_file.name})
-        llm_turns += 1
-        _apply_llm_response(response, rs_file)
-        _fix_stable_rust_features(rs_file)  # LLM sometimes re-adds stabilised feature flags
+            status_fn(f"LLM: rewriting {len(rs_files)} file(s) to idiomatic Rust (parallel)…")
 
+        # ── Phase 1: parallel idiomatic rewrite ───────────────────────────────
+        def _rewrite(rs_file: Path) -> tuple:
+            log.info(f"LLM idiomatic rewrite of {rs_file.name}")
+            return rs_file, llm.complete(IDIOMATIC_SYSTEM_PROMPT, rs_file.read_text())
+
+        with ThreadPoolExecutor(max_workers=len(rs_files)) as executor:
+            rewrites = list(executor.map(_rewrite, rs_files))
+
+        for rs_file, response in rewrites:
+            _apply_llm_response(response, rs_file)
+            _fix_stable_rust_features(rs_file)
+            llm_log.append({"phase": "idiomatic", "file": rs_file.name})
+            llm_turns += 1
+
+        # ── Phase 2: build once after all rewrites ────────────────────────────
         build_ok, build_output = _cargo_build(cargo_toml)
         with open(cargo_build_log, "a") as fh:
             fh.write(
-                f"=== {rs_file.name} (after idiomatic rewrite) ===\n"
+                f"=== after parallel idiomatic rewrite ===\n"
                 f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
             )
+
+        # ── Phase 3: repair loop ──────────────────────────────────────────────
         for attempt in range(max_retries):
             if build_ok:
-                log.info(f"  cargo build OK after idiomatic rewrite of {rs_file.name}")
                 break
-            # Try deterministic fixes before spending an LLM turn
-            if _fix_duplicate_no_mangle(rs_file, build_output):
-                log.info(f"  Fixed duplicate #[no_mangle] in {rs_file.name} without LLM")
+
+            failing = _get_failing_rust_files(build_output, output_dir)
+            _console.print(
+                f"  [yellow]⚠ Idiomatic Rust build failed[/yellow] "
+                f"({len(failing)} file(s)): "
+                f"[dim]{_first_error_line(build_output)}[/dim]"
+            )
+
+            # Deterministic dedup fix first (no LLM cost)
+            dedup_fixed = any(_fix_duplicate_no_mangle(f, build_output) for f in failing)
+            if dedup_fixed:
                 build_ok, build_output = _cargo_build(cargo_toml)
                 with open(cargo_build_log, "a") as fh:
                     fh.write(
-                        f"=== {rs_file.name} dedup fix ===\n"
+                        f"=== dedup fix (attempt {attempt+1}) ===\n"
                         f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
                     )
                 if build_ok:
                     break
-            _console.print(
-                f"  [yellow]⚠ Idiomatic Rust build failed[/yellow] in [bold]{rs_file.name}[/bold]: "
-                f"[dim]{_first_error_line(build_output)}[/dim]"
-            )
-            log.warning(f"  build failed after idiomatic rewrite of {rs_file.name}, attempt {attempt+1}/{max_retries}")
+                failing = _get_failing_rust_files(build_output, output_dir)
+
             if status_fn:
-                status_fn(f"LLM: fixing idiomatic Rust build (attempt {attempt+1}/{max_retries})…")
-            repair_response = llm.repair(
-                context="Fix compilation error after making Rust code idiomatic.",
-                error=build_output,
-                code=rs_file.read_text(),
+                status_fn(
+                    f"LLM: fixing idiomatic Rust build — {len(failing)} file(s) "
+                    f"(attempt {attempt+1}/{max_retries})…"
+                )
+            log.warning(
+                f"build failed after idiomatic rewrite, attempt {attempt+1}/{max_retries}, "
+                f"failing: {[f.name for f in failing]}"
             )
-            llm_log.append({"phase": "idiomatic_repair", "attempt": attempt, "error": build_output})
-            llm_turns += 1
-            retries += 1
-            _apply_llm_response(repair_response, rs_file)
-            _fix_stable_rust_features(rs_file)
+
+            def _repair(rs_file: Path) -> tuple:
+                return rs_file, llm.repair(
+                    context="Fix compilation error after making Rust code idiomatic.",
+                    error=build_output,
+                    code=rs_file.read_text(),
+                )
+
+            with ThreadPoolExecutor(max_workers=len(failing)) as executor:
+                repairs = list(executor.map(_repair, failing))
+
+            for rs_file, response in repairs:
+                _apply_llm_response(response, rs_file)
+                _fix_stable_rust_features(rs_file)
+                llm_log.append({"phase": "idiomatic_repair", "attempt": attempt, "error": build_output})
+                llm_turns += 1
+                retries += 1
+
             build_ok, build_output = _cargo_build(cargo_toml)
             with open(cargo_build_log, "a") as fh:
                 fh.write(
-                    f"=== {rs_file.name} repair attempt {attempt+1} ===\n"
+                    f"=== repair attempt {attempt+1} ===\n"
                     f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
                 )
 
         if not build_ok:
-            log.warning(f"  reverting {rs_file.name} — could not fix after {max_retries} attempts")
-            # Restore from previous stage
-            orig = rust_dir / rs_file.relative_to(output_dir)
-            if orig.exists():
-                shutil.copy(orig, rs_file)
+            log.warning("Could not fix build after all retries — reverting all rewritten files")
+            for rs_file in rs_files:
+                orig = rust_dir / rs_file.relative_to(output_dir)
+                if orig.exists():
+                    shutil.copy(orig, rs_file)
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
     (output_dir / "llm_conversations.json").write_text(
