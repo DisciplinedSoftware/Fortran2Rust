@@ -22,3 +22,5 @@ To run non-interactively (converts `dgemm` from BLAS as a demo):
 ```bash
 fortran2rust --non-interactive
 ```
+
+Each pipeline run writes artifacts under `artifacts/<run_id>/`. The final Rust output is available directly at the run root as `Cargo.toml` and `src/` (exported from Stage 8), in addition to the per-stage folders and report files.

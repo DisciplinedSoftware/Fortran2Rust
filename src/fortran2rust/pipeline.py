@@ -2,10 +2,26 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable
+import shutil
 
 from rich.console import Console
 
 from .config import Config, make_run_id
+
+
+def _export_final_rust_to_run_root(run_dir: Path, rust_stage_dir: Path) -> None:
+    cargo_src = rust_stage_dir / "Cargo.toml"
+    src_src = rust_stage_dir / "src"
+    if not cargo_src.exists() or not src_src.exists():
+        return
+
+    cargo_dst = run_dir / "Cargo.toml"
+    src_dst = run_dir / "src"
+
+    shutil.copy2(cargo_src, cargo_dst)
+    if src_dst.exists():
+        shutil.rmtree(src_dst)
+    shutil.copytree(src_src, src_dst)
 
 
 def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) -> Path:
@@ -135,6 +151,8 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                     s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
                     s2_dir = run_dir / s2_dirs[0].name
                     results[8] = make_idiomatic(s7_dir, stage_dir, llm, config.max_retries, s2_dir, status_fn=status_fn)
+                    # Keep final Rust crate easy to consume from the run root.
+                    _export_final_rust_to_run_root(run_dir, stage_dir)
 
                 elif stage_num == 9:
                     from .stages.s9_report import generate_report
