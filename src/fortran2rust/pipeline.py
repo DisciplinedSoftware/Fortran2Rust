@@ -183,6 +183,7 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
         anthropic_api_key=config.anthropic_api_key,
         google_api_key=config.google_api_key,
         openrouter_api_key=config.openrouter_api_key,
+        github_token=config.github_token,
         ollama_base_url=config.ollama_base_url,
     )
 

@@ -10,7 +10,7 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(), override=False)
 
-PROVIDERS = ["openai", "anthropic", "google", "openrouter", "ollama"]
+PROVIDERS = ["openai", "anthropic", "google", "openrouter", "github", "ollama"]
 
 
 @dataclass
@@ -22,6 +22,7 @@ class Config:
     anthropic_api_key: str = ""
     google_api_key: str = ""
     openrouter_api_key: str = ""
+    github_token: str = ""
     ollama_base_url: str = "http://localhost:11434"
     max_retries: int = 5
     output_dir: Path = field(default_factory=lambda: Path("./artifacts"))
@@ -39,6 +40,7 @@ def load_config(**overrides) -> Config:
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "") or generic_api_key,
         google_api_key=os.getenv("GOOGLE_API_KEY", "") or generic_api_key,
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "") or generic_api_key,
+        github_token=os.getenv("GITHUB_TOKEN", "") or generic_api_key,
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         max_retries=int(os.getenv("MAX_RETRIES", "5")),
         output_dir=Path(os.getenv("OUTPUT_DIR", "./artifacts")),

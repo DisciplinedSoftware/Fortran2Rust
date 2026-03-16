@@ -20,6 +20,9 @@ def get_llm_client(provider: str, model: str, **keys) -> LLMClient:
     elif provider == "openrouter":
         from .openrouter_client import OpenRouterClient
         return OpenRouterClient(api_key=keys["openrouter_api_key"], model=model)
+    elif provider == "github":
+        from .github_models_client import GitHubModelsClient
+        return GitHubModelsClient(api_key=keys["github_token"], model=model)
     elif provider == "ollama":
         from .ollama_client import OllamaClient
         return OllamaClient(base_url=keys.get("ollama_base_url", "http://localhost:11434"), model=model)
