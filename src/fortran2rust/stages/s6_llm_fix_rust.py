@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
-from ._bench import _fix_bench_extern_types, _fix_stable_rust_features, print_bench_summary, run_rust_benchmarks
+from ._bench import _fix_bench_extern_types, _fix_stable_rust_features, _get_failing_rust_files, print_bench_summary, run_rust_benchmarks
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -24,13 +25,6 @@ def _first_error_line(error: str) -> str:
         if "error" in line.lower() and line.strip():
             return line.strip()[:120]
     return error.strip()[:120]
-
-
-def _read_rust_files(directory: Path) -> str:
-    parts = []
-    for f in sorted(directory.rglob("*.rs")):
-        parts.append(f"--- {f.relative_to(directory)} ---\n{f.read_text()}")
-    return "\n\n".join(parts)
 
 
 def _apply_llm_response(response: str, output_dir: Path) -> None:
@@ -109,23 +103,40 @@ def fix_rust_code(
     for attempt in range(max_retries):
         if build_ok:
             break
+        failing = _get_failing_rust_files(build_output, output_dir)
         _console.print(
-            f"  [yellow]⚠ Rust build failed[/yellow]: "
+            f"  [yellow]⚠ Rust build failed[/yellow] "
+            f"({len(failing)} file(s)): "
             f"[dim]{_first_error_line(build_output)}[/dim]"
         )
         if status_fn:
-            status_fn(f"LLM: fixing Rust compilation (attempt {attempt+1}/{max_retries})…")
-        log.info(f"LLM repair attempt {attempt+1}/{max_retries}")
-        code = _read_rust_files(output_dir)
-        response = llm.repair(
-            context="Fix this Rust code that was transpiled from C by c2rust. Fix all compilation errors.",
-            error=build_output,
-            code=code,
-        )
-        llm_log.append({"phase": "build", "attempt": attempt, "error": build_output})
-        llm_turns += 1
-        retries += 1
-        _apply_llm_response(response, output_dir)
+            status_fn(
+                f"LLM: fixing {len(failing)} failing Rust file(s) "
+                f"(attempt {attempt+1}/{max_retries})…"
+            )
+        log.info(f"LLM repair attempt {attempt+1}/{max_retries}: {[f.name for f in failing]}")
+
+        def _repair(rs_file: Path) -> tuple:
+            code = rs_file.read_text()
+            response = llm.repair(
+                context=(
+                    "Fix this Rust file that was transpiled from C by c2rust. "
+                    "Fix all compilation errors shown."
+                ),
+                error=build_output,
+                code=code,
+            )
+            return rs_file, response
+
+        with ThreadPoolExecutor(max_workers=len(failing)) as executor:
+            repairs = list(executor.map(_repair, failing))
+
+        for rs_file, response in repairs:
+            _apply_llm_response(response, output_dir)
+            llm_log.append({"phase": "build", "attempt": attempt, "file": rs_file.name, "error": build_output})
+            llm_turns += 1
+            retries += 1
+
         build_ok, build_output = _cargo_build(cargo_toml)
         build_error = build_output
         with open(cargo_build_log, "a") as fh:
