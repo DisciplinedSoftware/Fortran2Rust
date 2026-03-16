@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -436,16 +437,24 @@ def fix_c_code(
     gcc_compile_log = output_dir / "gcc_compile.log"
 
     # ── Pre-step: LLM-convert any .f files that f2c could not handle ─────────
-    for f_file in sorted(c_dir.glob("*.f")):
-        c_equiv = output_dir / f_file.with_suffix(".c").name
-        if not c_equiv.exists():
-            if status_fn:
-                status_fn(f"LLM: converting {f_file.name} to C (f2c could not handle it)…")
+    f_files_to_convert = [
+        f_file for f_file in sorted(c_dir.glob("*.f"))
+        if not (output_dir / f_file.with_suffix(".c").name).exists()
+    ]
+    if f_files_to_convert:
+        if status_fn:
+            status_fn(f"LLM: converting {len(f_files_to_convert)} Fortran file(s) to C (parallel)…")
+
+        def _convert_one(f_file: Path) -> None:
             log.info(f"LLM converting {f_file.name} to C (f2c could not handle it)")
             dest_f = output_dir / f_file.name
             shutil.copy(f_file, dest_f)
             _generate_c_from_fortran(llm, dest_f, output_dir)
-            llm_turns += 1
+
+        with ThreadPoolExecutor(max_workers=len(f_files_to_convert)) as executor:
+            list(executor.map(_convert_one, f_files_to_convert))
+
+        llm_turns += len(f_files_to_convert)
 
     # ── Compile loop: fix one failing file at a time ──────────────────────────
     if status_fn:
@@ -461,27 +470,35 @@ def fix_c_code(
     attempt = 0
     while not compile_ok and attempt < max_retries:
         failing_files = _get_failing_files(compile_output, output_dir)
-        target = failing_files[0]
         _console.print(
-            f"  [yellow]⚠ C compilation failed[/yellow] in [bold]{target.name}[/bold]: "
+            f"  [yellow]⚠ C compilation failed[/yellow] in "
+            f"[bold]{', '.join(f.name for f in failing_files)}[/bold]: "
             f"[dim]{_first_error_line(compile_output)}[/dim]"
         )
-        llm_log.append({
-            "phase": "compile", "attempt": attempt,
-            "target_file": target.name,
-            "error": compile_output,
-        })
-        if status_fn:
-            status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
-        log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
-        _repair_file(llm, target, compile_output)
-        llm_turns += 1
-        total_retries += 1
+
+        # Fix all currently-failing files in parallel, then recompile once.
+        def _fix_one(target: Path) -> None:
+            llm_log.append({
+                "phase": "compile", "attempt": attempt,
+                "target_file": target.name,
+                "error": compile_output,
+            })
+            if status_fn:
+                status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
+            log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
+            _repair_file(llm, target, compile_output)
+
+        with ThreadPoolExecutor(max_workers=len(failing_files)) as executor:
+            list(executor.map(_fix_one, failing_files))
+
+        llm_turns += len(failing_files)
+        total_retries += len(failing_files)
         compile_ok, compile_output = _compile_c(output_dir)
         compile_error = compile_output
         with open(gcc_compile_log, "a") as fh:
             fh.write(
-                f"=== ATTEMPT {attempt+1} (after LLM fix of {target.name}) ===\n"
+                f"=== ATTEMPT {attempt+1} (after LLM fix of "
+                f"{[f.name for f in failing_files]}) ===\n"
                 f"{compile_output}\n=== EXIT: {'OK' if compile_ok else 'FAIL'} ===\n\n"
             )
         if compile_ok:
