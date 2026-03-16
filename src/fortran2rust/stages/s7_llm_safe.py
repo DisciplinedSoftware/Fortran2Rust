@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
+from ._log import make_stage_logger
 
 _console = Console(stderr=True)
 
@@ -37,7 +38,7 @@ def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
         text=True,
         timeout=300,
     )
-    return result.returncode == 0, result.stderr
+    return result.returncode == 0, result.stdout + result.stderr
 
 
 def _count_unsafe(content: str) -> int:
@@ -58,11 +59,14 @@ def make_safe(
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    log = make_stage_logger(output_dir)
+    log.info(f"make_safe: rust_dir={rust_dir}, max_retries={max_retries}")
 
     if output_dir != rust_dir:
         shutil.copytree(rust_dir, output_dir, dirs_exist_ok=True)
 
     cargo_toml = output_dir / "Cargo.toml"
+    cargo_build_log = output_dir / "cargo_build.log"
     llm_log: list[dict] = []
     llm_turns = 0
     retries = 0
@@ -72,6 +76,7 @@ def make_safe(
     rs_files = [f for f in output_dir.rglob("*.rs") if "bench" not in f.name and "test" not in f.name]
     for f in rs_files:
         unsafe_before += _count_unsafe(f.read_text())
+    log.info(f"unsafe blocks before: {unsafe_before} across {len(rs_files)} files")
 
     # Process each file
     for rs_file in rs_files:
@@ -82,34 +87,48 @@ def make_safe(
 
         if status_fn:
             status_fn(f"LLM: removing unsafe from {rs_file.name} ({n} occurrences)…")
+        log.info(f"LLM removing {n} unsafe block(s) from {rs_file.name}")
         response = llm.complete(SAFE_SYSTEM_PROMPT, content)
         llm_log.append({"phase": "safe", "file": str(rs_file.name), "unsafe_count": _count_unsafe(content)})
         llm_turns += 1
         _apply_llm_response(response, rs_file)
 
         # Verify build after each file
-        build_ok, build_error = _cargo_build(cargo_toml)
+        build_ok, build_output = _cargo_build(cargo_toml)
+        with open(cargo_build_log, "a") as fh:
+            fh.write(
+                f"=== {rs_file.name} (after unsafe removal) ===\n"
+                f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+            )
         for attempt in range(max_retries):
             if build_ok:
+                log.info(f"  cargo build OK after removing unsafe from {rs_file.name}")
                 break
             _console.print(
                 f"  [yellow]⚠ Safe Rust build failed[/yellow] in [bold]{rs_file.name}[/bold]: "
-                f"[dim]{_first_error_line(build_error)}[/dim]"
+                f"[dim]{_first_error_line(build_output)}[/dim]"
             )
+            log.warning(f"  build failed after unsafe removal in {rs_file.name}, attempt {attempt+1}/{max_retries}")
             if status_fn:
                 status_fn(f"LLM: fixing safe Rust build (attempt {attempt+1}/{max_retries})…")
             repair_response = llm.repair(
                 context="Fix compilation error after removing unsafe blocks in Rust code.",
-                error=build_error,
+                error=build_output,
                 code=rs_file.read_text(),
             )
-            llm_log.append({"phase": "safe_repair", "attempt": attempt, "error": build_error[:2000]})
+            llm_log.append({"phase": "safe_repair", "attempt": attempt, "error": build_output})
             llm_turns += 1
             retries += 1
             _apply_llm_response(repair_response, rs_file)
-            build_ok, build_error = _cargo_build(cargo_toml)
+            build_ok, build_output = _cargo_build(cargo_toml)
+            with open(cargo_build_log, "a") as fh:
+                fh.write(
+                    f"=== {rs_file.name} repair attempt {attempt+1} ===\n"
+                    f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+                )
 
         if not build_ok:
+            log.warning(f"  reverting {rs_file.name} — could not fix after {max_retries} attempts")
             # Restore original
             original = rust_dir / rs_file.relative_to(output_dir)
             if original.exists():
@@ -119,6 +138,7 @@ def make_safe(
     unsafe_after = 0
     for f in rs_files:
         unsafe_after += _count_unsafe(f.read_text())
+    log.info(f"unsafe blocks after: {unsafe_after} (removed {unsafe_before - unsafe_after})")
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
     result = {
@@ -128,4 +148,5 @@ def make_safe(
         "retries": retries,
     }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
+    log.info("Stage complete")
     return result

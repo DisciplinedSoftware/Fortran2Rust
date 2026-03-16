@@ -5,6 +5,8 @@ import logging
 import warnings
 from pathlib import Path
 
+from ._log import make_stage_logger
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,9 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
     from fparser.two import Fortran2003
     from fparser.two.utils import walk
 
+    log = make_stage_logger(output_dir)
+    log.info(f"analyze_dependencies: source_dir={source_dir}, entry_points={entry_points}")
+
     # Map: function_name (upper) -> source file path
     name_to_file: dict[str, Path] = {}
     # Map: function_name (upper) -> set of called function names (upper)
@@ -54,12 +59,14 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
 
     if status_fn:
         status_fn(f"Scanning {len(all_files)} Fortran files…")
+    log.info(f"Scanning {len(all_files)} Fortran source files")
 
     for i, f in enumerate(all_files):
         if status_fn:
             status_fn(f"Parsing {f.name} ({i+1}/{len(all_files)})…")
         tree = _parse_file(f)
         if tree is None:
+            log.warning(f"Failed to parse {f.name} — skipping")
             continue
 
         # Process each subprogram separately for accurate per-function call attribution
@@ -117,6 +124,9 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
 
     if status_fn:
         status_fn(f"Found {len(reachable_files)} source files, {len(reachable_functions)} functions")
+    log.info(f"Reachable files: {len(reachable_files)}, reachable functions: {len(reachable_functions)}")
+    for fn in reachable_functions:
+        log.info(f"  function: {fn} <- {name_to_file.get(fn, '(unknown)')}")
 
     # Print summary of functions that will be converted
     from rich.columns import Columns
@@ -134,6 +144,7 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
 
     if status_fn:
         status_fn("Writing dependency graph…")
+    log.info("Writing dep_graph.json and dep_graph.dot")
 
     result = {
         "files": reachable_files,
@@ -151,4 +162,5 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
     dot_lines.append("}")
     (output_dir / "dep_graph.dot").write_text("\n".join(dot_lines))
 
+    log.info("Stage complete")
     return result

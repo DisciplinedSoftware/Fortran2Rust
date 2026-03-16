@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
+from ._log import make_stage_logger
 
 _console = Console(stderr=True)
 
@@ -39,7 +40,7 @@ def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
         text=True,
         timeout=300,
     )
-    return result.returncode == 0, result.stderr
+    return result.returncode == 0, result.stdout + result.stderr
 
 
 def _apply_llm_response(response: str, target_file: Path) -> None:
@@ -56,48 +57,66 @@ def make_idiomatic(
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    log = make_stage_logger(output_dir)
+    log.info(f"make_idiomatic: rust_dir={rust_dir}, max_retries={max_retries}")
 
     if output_dir != rust_dir:
         shutil.copytree(rust_dir, output_dir, dirs_exist_ok=True)
 
     cargo_toml = output_dir / "Cargo.toml"
+    cargo_build_log = output_dir / "cargo_build.log"
     llm_log: list[dict] = []
     llm_turns = 0
     retries = 0
 
     rs_files = [f for f in output_dir.rglob("*.rs") if "bench" not in f.name and "test" not in f.name]
+    log.info(f"Processing {len(rs_files)} Rust files")
 
     for rs_file in rs_files:
         content = rs_file.read_text()
         if status_fn:
             status_fn(f"LLM: making {rs_file.name} idiomatic…")
+        log.info(f"LLM idiomatic rewrite of {rs_file.name}")
         response = llm.complete(IDIOMATIC_SYSTEM_PROMPT, content)
         llm_log.append({"phase": "idiomatic", "file": rs_file.name})
         llm_turns += 1
         _apply_llm_response(response, rs_file)
 
-        build_ok, build_error = _cargo_build(cargo_toml)
+        build_ok, build_output = _cargo_build(cargo_toml)
+        with open(cargo_build_log, "a") as fh:
+            fh.write(
+                f"=== {rs_file.name} (after idiomatic rewrite) ===\n"
+                f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+            )
         for attempt in range(max_retries):
             if build_ok:
+                log.info(f"  cargo build OK after idiomatic rewrite of {rs_file.name}")
                 break
             _console.print(
                 f"  [yellow]⚠ Idiomatic Rust build failed[/yellow] in [bold]{rs_file.name}[/bold]: "
-                f"[dim]{_first_error_line(build_error)}[/dim]"
+                f"[dim]{_first_error_line(build_output)}[/dim]"
             )
+            log.warning(f"  build failed after idiomatic rewrite of {rs_file.name}, attempt {attempt+1}/{max_retries}")
             if status_fn:
                 status_fn(f"LLM: fixing idiomatic Rust build (attempt {attempt+1}/{max_retries})…")
             repair_response = llm.repair(
                 context="Fix compilation error after making Rust code idiomatic.",
-                error=build_error,
+                error=build_output,
                 code=rs_file.read_text(),
             )
-            llm_log.append({"phase": "idiomatic_repair", "attempt": attempt, "error": build_error[:2000]})
+            llm_log.append({"phase": "idiomatic_repair", "attempt": attempt, "error": build_output})
             llm_turns += 1
             retries += 1
             _apply_llm_response(repair_response, rs_file)
-            build_ok, build_error = _cargo_build(cargo_toml)
+            build_ok, build_output = _cargo_build(cargo_toml)
+            with open(cargo_build_log, "a") as fh:
+                fh.write(
+                    f"=== {rs_file.name} repair attempt {attempt+1} ===\n"
+                    f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+                )
 
         if not build_ok:
+            log.warning(f"  reverting {rs_file.name} — could not fix after {max_retries} attempts")
             # Restore from previous stage
             orig = rust_dir / rs_file.relative_to(output_dir)
             if orig.exists():
@@ -110,4 +129,5 @@ def make_idiomatic(
         "retries": retries,
     }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
+    log.info("Stage complete")
     return result

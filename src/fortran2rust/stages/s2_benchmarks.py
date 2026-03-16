@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ._log import make_stage_logger
+
 N_DEFAULT = 500  # matrix size giving ~1ms per DGEMM call
 
 KNOWN_BLAS = {
@@ -407,16 +409,20 @@ def generate_benchmarks(
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     N = N_DEFAULT
+    log = make_stage_logger(output_dir)
+    log.info(f"generate_benchmarks: entry_points={entry_points}, N={N}")
 
     # ── Phase 1: datasets (always first, unconditionally) ────────────────────
     # Datasets are the shared ground truth for Fortran, C, and Rust.
     # They are generated before any compilation so they're always present.
     if status_fn:
         status_fn(f"Generating shared input datasets for {len(entry_points)} function(s)…")
+    log.info(f"Generating input datasets for {len(entry_points)} function(s)")
     all_datasets: dict[str, dict] = {}
     for ep in entry_points:
         dataset = generate_dataset(ep, N, output_dir)
         all_datasets[ep] = {k: str(v) for k, v in dataset.items()}
+        log.info(f"  dataset for {ep}: {list(dataset.keys())}")
         if ep.upper() in KNOWN_BLAS:
             prec_dataset = generate_precision_dataset(ep, N, output_dir)
             all_datasets[ep + "_precision"] = {k: str(v) for k, v in prec_dataset.items()}
@@ -475,7 +481,10 @@ def generate_benchmarks(
             "dataset": {k: str(v) for k, v in dataset_paths.items()},
             "compile_cmd": compile_cmd,
             "compile_ok": False,
-            "compile_error": "",
+            "compile_stdout": "",
+            "compile_stderr": "",
+            "run_stdout": "",
+            "run_stderr": "",
             "time_ms": None,
             "output_file": None,
         }
@@ -483,31 +492,55 @@ def generate_benchmarks(
         try:
             if status_fn:
                 status_fn(f"Compiling Fortran benchmark for {ep}…")
+            log.info(f"Compiling Fortran benchmark for {ep}: {' '.join(compile_cmd)}")
             result = subprocess.run(
                 compile_cmd, capture_output=True, text=True,
                 cwd=str(output_dir), timeout=120,
             )
+            bench_info["compile_stdout"] = result.stdout
+            bench_info["compile_stderr"] = result.stderr
+            compile_log = output_dir / f"gfortran_{ep_lower}.log"
+            compile_log.write_text(
+                f"=== COMMAND ===\n{' '.join(compile_cmd)}\n\n"
+                f"=== STDOUT ===\n{result.stdout}\n"
+                f"=== STDERR ===\n{result.stderr}\n"
+                f"=== EXIT CODE: {result.returncode} ===\n"
+            )
             if result.returncode == 0:
                 bench_info["compile_ok"] = True
+                log.info(f"  gfortran OK for {ep}")
                 if status_fn:
                     status_fn(f"Running Fortran baseline for {ep}…")
+                log.info(f"  Running Fortran baseline for {ep}")
                 run_result = subprocess.run(
                     [str(output_dir / f"bench_{ep_lower}")],
                     capture_output=True, text=True,
                     cwd=str(output_dir), timeout=300,
                 )
+                bench_info["run_stdout"] = run_result.stdout
+                bench_info["run_stderr"] = run_result.stderr
+                with open(compile_log, "a") as fh:
+                    fh.write(
+                        f"\n=== RUN STDOUT ===\n{run_result.stdout}\n"
+                        f"=== RUN STDERR ===\n{run_result.stderr}\n"
+                        f"=== RUN EXIT CODE: {run_result.returncode} ===\n"
+                    )
                 match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", run_result.stdout)
                 if match:
                     bench_info["time_ms"] = float(match.group(1))
+                    log.info(f"  Fortran baseline time: {bench_info['time_ms']:.4f} ms")
                 bin_file = output_dir / f"bench_{ep_lower}_output.bin"
                 if bin_file.exists():
                     bench_info["output_file"] = str(bin_file)
             else:
-                bench_info["compile_error"] = result.stderr
+                log.warning(f"  gfortran FAILED for {ep} (exit {result.returncode})")
+                log.warning(f"  stderr: {result.stderr[:500]}")
         except subprocess.TimeoutExpired:
-            bench_info["compile_error"] = "Timeout"
+            bench_info["compile_stderr"] = "Timeout"
+            log.warning(f"  gfortran timed out for {ep}")
         except Exception as e:
-            bench_info["compile_error"] = str(e)
+            bench_info["compile_stderr"] = str(e)
+            log.warning(f"  gfortran exception for {ep}: {e}")
 
         benchmarks[ep] = bench_info
 
@@ -518,6 +551,7 @@ def generate_benchmarks(
         "datasets": all_datasets,
     }
     (output_dir / "benchmarks.json").write_text(json.dumps(result_data, indent=2, default=str))
+    log.info("Stage complete")
     return result_data
 
 

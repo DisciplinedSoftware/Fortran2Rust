@@ -6,6 +6,8 @@ from pathlib import Path
 
 from jinja2 import BaseLoader, Environment
 
+from ._log import make_stage_logger
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -223,8 +225,15 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
     stage_results = config.get("stage_results", {})
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Use the s9 stage directory (created by pipeline.py before calling this function)
+    s9_dirs = [d for d in run_dir.iterdir() if d.is_dir() and d.name.startswith("s9_")]
+    log_dir = s9_dirs[0] if s9_dirs else run_dir
+    log = make_stage_logger(log_dir)
+    log.info(f"generate_report: run_id={run_id}, entry_points={entry_points}")
+
     if status_fn:
         status_fn("Collecting benchmark results…")
+    log.info("Collecting benchmark results")
 
     # Collect benchmark data
     bench_data = {}
@@ -259,6 +268,7 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
     stages_completed = sum(1 for s in stage_log if s["ok"])
     llm_turns_total = sum(s["llm_turns"] for s in stage_log)
     overall_ok = all(s["ok"] for s in stage_log)
+    log.info(f"Stages completed: {stages_completed}/{len(STAGE_NAMES)}, LLM turns: {llm_turns_total}, overall: {'PASS' if overall_ok else 'FAIL'}")
 
     summary = {
         "total_functions": len(entry_points),
@@ -269,6 +279,7 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
     }
 
     artifacts = _collect_artifacts(run_dir)
+    log.info(f"Collected {len(artifacts)} artifacts")
 
     ctx = {
         "run_id": run_id,
@@ -289,9 +300,12 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
 
     if status_fn:
         status_fn("Rendering HTML report…")
+    log.info("Rendering HTML report")
     html_path.write_text(html_tmpl.render(**ctx))
     if status_fn:
         status_fn("Rendering Markdown report…")
+    log.info("Rendering Markdown report")
     md_path.write_text(md_tmpl.render(**ctx))
 
+    log.info("Stage complete")
     return html_path

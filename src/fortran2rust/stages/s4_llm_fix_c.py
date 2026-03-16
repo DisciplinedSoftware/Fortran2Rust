@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError, NumericalPrecisionError, BenchmarkRuntimeError
+from ._log import make_stage_logger
 
 _console = Console(stderr=True)
 
@@ -80,11 +81,11 @@ def _compile_c(c_dir: Path) -> tuple[bool, str]:
         + ["-lm", "-lf2c"],
         capture_output=True, text=True, timeout=120,
     )
-    return result.returncode == 0, result.stderr
+    return result.returncode == 0, result.stdout + result.stderr
 
 
-def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset_dir: Path) -> tuple[bool, str, Path | None]:
-    """Compile and run a C benchmark driver. Returns (ok, error, output_bin_path)."""
+def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset_dir: Path) -> tuple[bool, str, Path | None, float | None]:
+    """Compile and run a C benchmark driver. Returns (ok, error, output_bin_path, c_time_ms)."""
     c_lib_files = [f for f in sorted(c_dir.glob("*.c")) if "bench_" not in f.name]
     exe = output_dir / ("bench_c_" + bench_c.stem)
     cmd = (
@@ -93,25 +94,43 @@ def _compile_and_run_bench(c_dir: Path, bench_c: Path, output_dir: Path, dataset
         + ["-lm", "-lf2c", "-o", str(exe)]
     )
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    bench_log = output_dir / f"gcc_bench_{bench_c.stem}.log"
+    bench_log.write_text(
+        f"=== COMPILE COMMAND ===\n{' '.join(cmd)}\n\n"
+        f"=== COMPILE STDOUT ===\n{r.stdout}\n"
+        f"=== COMPILE STDERR ===\n{r.stderr}\n"
+        f"=== COMPILE EXIT CODE: {r.returncode} ===\n"
+    )
     if r.returncode != 0:
-        return False, r.stderr, None
+        return False, r.stdout + r.stderr, None, None
 
     run = subprocess.run(
         [str(exe)], capture_output=True, text=True,
         cwd=str(dataset_dir),   # run in dataset dir so it finds dataset_*.bin
         timeout=300,
     )
+    with open(bench_log, "a") as fh:
+        fh.write(
+            f"\n=== RUN STDOUT ===\n{run.stdout}\n"
+            f"=== RUN STDERR ===\n{run.stderr}\n"
+            f"=== RUN EXIT CODE: {run.returncode} ===\n"
+        )
     if run.returncode != 0:
-        return False, run.stderr, None
+        return False, run.stdout + run.stderr, None, None
+
+    c_time_ms: float | None = None
+    m = re.search(r"C_TIME_MS=([\d.]+)", run.stdout)
+    if m:
+        c_time_ms = float(m.group(1))
 
     # output bin is written to cwd (dataset_dir)
     fn_name = re.sub(r"^bench_", "", bench_c.stem)
     bin_out = dataset_dir / f"bench_{fn_name}_output_c.bin"
-    # The C benchmark writes bench_<fn>_output.bin — rename/copy so we don't overwrite Fortran's
+    # The C benchmark writes bench_<fn>_output.bin — copy so we don't overwrite Fortran's
     orig = dataset_dir / f"bench_{fn_name}_output.bin"
     if orig.exists():
         shutil.copy(orig, bin_out)
-    return True, "", bin_out if bin_out.exists() else None
+    return True, "", bin_out if bin_out.exists() else None, c_time_ms
 
 
 def _repair_file(llm: "LLMClient", failing_file: Path, error: str) -> None:
@@ -163,6 +182,8 @@ def fix_c_code(
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    log = make_stage_logger(output_dir)
+    log.info(f"fix_c_code: c_dir={c_dir}, max_retries={max_retries}")
 
     for f in c_dir.glob("*.c"):
         shutil.copy(f, output_dir / f.name)
@@ -172,6 +193,7 @@ def fix_c_code(
     llm_log: list[dict] = []
     llm_turns = 0
     total_retries = 0
+    gcc_compile_log = output_dir / "gcc_compile.log"
 
     # ── Pre-step: LLM-convert any .f files that f2c could not handle ─────────
     for f_file in sorted(c_dir.glob("*.f")):
@@ -179,6 +201,7 @@ def fix_c_code(
         if not c_equiv.exists():
             if status_fn:
                 status_fn(f"LLM: converting {f_file.name} to C (f2c could not handle it)…")
+            log.info(f"LLM converting {f_file.name} to C (f2c could not handle it)")
             dest_f = output_dir / f_file.name
             shutil.copy(f_file, dest_f)
             _generate_c_from_fortran(llm, dest_f, output_dir)
@@ -187,34 +210,53 @@ def fix_c_code(
     # ── Compile loop: fix one failing file at a time ──────────────────────────
     if status_fn:
         status_fn("Compiling C code…")
-    compile_ok, compile_error = _compile_c(output_dir)
+    compile_ok, compile_output = _compile_c(output_dir)
+    compile_error = compile_output  # full output kept for result.json
+    with open(gcc_compile_log, "a") as fh:
+        fh.write(f"=== INITIAL COMPILE ===\n{compile_output}\n=== EXIT: {'OK' if compile_ok else 'FAIL'} ===\n\n")
+    log.info(f"Initial C compile: {'OK' if compile_ok else 'FAILED'}")
+    if not compile_ok:
+        log.warning(compile_output)
+
     attempt = 0
     while not compile_ok and attempt < max_retries:
-        failing_files = _get_failing_files(compile_error, output_dir)
+        failing_files = _get_failing_files(compile_output, output_dir)
         target = failing_files[0]
         _console.print(
             f"  [yellow]⚠ C compilation failed[/yellow] in [bold]{target.name}[/bold]: "
-            f"[dim]{_first_error_line(compile_error)}[/dim]"
+            f"[dim]{_first_error_line(compile_output)}[/dim]"
         )
         llm_log.append({
             "phase": "compile", "attempt": attempt,
             "target_file": target.name,
-            "error_snippet": compile_error[:500],
+            "error": compile_output,
         })
         if status_fn:
             status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
-        _repair_file(llm, target, compile_error)
+        log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
+        _repair_file(llm, target, compile_output)
         llm_turns += 1
         total_retries += 1
-        compile_ok, compile_error = _compile_c(output_dir)
+        compile_ok, compile_output = _compile_c(output_dir)
+        compile_error = compile_output
+        with open(gcc_compile_log, "a") as fh:
+            fh.write(
+                f"=== ATTEMPT {attempt+1} (after LLM fix of {target.name}) ===\n"
+                f"{compile_output}\n=== EXIT: {'OK' if compile_ok else 'FAIL'} ===\n\n"
+            )
+        if compile_ok:
+            log.info(f"C compile OK after attempt {attempt+1}")
+        else:
+            log.warning(f"C compile still failing after attempt {attempt+1}")
         attempt += 1
 
     if not compile_ok:
-        exc = CompilationError("C", compile_error[:500])
+        exc = CompilationError("C", compile_error)
         raise MaxRetriesExceededError("Stage 4 (fix C)", exc)
 
     if status_fn:
         status_fn("C compilation successful")
+    log.info("C compilation successful")
 
     # ── Benchmark loop ────────────────────────────────────────────────────────
     bench_ok = False
@@ -233,7 +275,8 @@ def fix_c_code(
 
                 if status_fn:
                     status_fn(f"Running C benchmark: {bench_c.stem}…")
-                ok, err, c_bin = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
+                log.info(f"Running C benchmark: {bench_c.stem}")
+                ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
                 for b_attempt in range(max_retries):
                     if ok and c_bin and c_bin.exists():
                         c_data = np.fromfile(str(c_bin), dtype=np.float64)
@@ -241,14 +284,16 @@ def fix_c_code(
                         if status_fn:
                             status_fn(f"Comparing {fn_name} output vs Fortran baseline…")
                         if c_data.shape == f_data.shape and np.allclose(c_data, f_data, atol=1e-10, rtol=1e-10):
-                            bench_results[fn_name] = {"pass": True, "max_abs_diff": 0.0}
+                            bench_results[fn_name] = {"pass": True, "max_abs_diff": 0.0, "c_time_ms": c_time_ms}
+                            log.info(f"  {fn_name}: numerical check PASSED, c_time_ms={c_time_ms}")
                             break
                         max_abs = float(np.max(np.abs(c_data - f_data))) if c_data.shape == f_data.shape else float("inf")
-                        bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs}
+                        bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs, "c_time_ms": c_time_ms}
                         _console.print(
                             f"  [yellow]⚠ Numerical precision failed[/yellow] for [bold]{fn_name}[/bold]: "
                             f"max diff = [bold]{max_abs:.3e}[/bold]"
                         )
+                        log.warning(f"  {fn_name}: numerical check FAILED, max_abs_diff={max_abs:.3e}")
                         err = f"Numerical mismatch: max_abs_diff={max_abs:.6e}"
                     else:
                         if not ok:
@@ -256,15 +301,17 @@ def fix_c_code(
                                 f"  [yellow]⚠ C benchmark failed to run[/yellow] for [bold]{fn_name}[/bold]: "
                                 f"[dim]{_first_error_line(err)}[/dim]"
                             )
+                            log.warning(f"  {fn_name}: benchmark run failed: {err}")
                     llm_log.append({
-                        "phase": "bench", "fn": fn_name, "attempt": b_attempt, "error": err[:300],
+                        "phase": "bench", "fn": fn_name, "attempt": b_attempt, "error": err,
                     })
                     if status_fn:
                         status_fn(f"LLM: fixing numerical precision in {bench_c.name} (attempt {b_attempt+1}/{max_retries})…")
+                    log.info(f"LLM bench repair attempt {b_attempt+1}/{max_retries} for {bench_c.name}")
                     _repair_file(llm, bench_c, err)
                     llm_turns += 1
                     total_retries += 1
-                    ok, err, c_bin = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
+                    ok, err, c_bin, c_time_ms = _compile_and_run_bench(output_dir, bench_c, output_dir, baseline_dir)
                 else:
                     all_passed = False
                     # Report what went wrong on final failure
@@ -272,13 +319,31 @@ def fix_c_code(
                     if last.get("max_abs_diff", 0) > 0:
                         exc = NumericalPrecisionError(fn_name, last["max_abs_diff"])
                     elif not ok:
-                        exc = BenchmarkRuntimeError(fn_name, err[:200])
+                        exc = BenchmarkRuntimeError(fn_name, err)
                     else:
                         exc = BenchmarkRuntimeError(fn_name, "unknown failure")
                     raise MaxRetriesExceededError("Stage 4 (benchmark)", exc)
             bench_ok = all_passed
 
     (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
+
+    # Generate compile_commands.json with absolute paths for c2rust (Stage 5).
+    # Exclude bench_*.c drivers — c2rust should only transpile the library files.
+    lib_c_files = [
+        f.resolve() for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")
+    ]
+    compile_commands = [
+        {
+            "file": str(f),
+            "directory": str(output_dir.resolve()),
+            "command": f"gcc -O2 -I{output_dir.resolve()} -c {f}",
+        }
+        for f in lib_c_files
+    ]
+    cc_path = output_dir / "compile_commands.json"
+    cc_path.write_text(json.dumps(compile_commands, indent=2))
+    log.info(f"Wrote compile_commands.json with {len(lib_c_files)} entries")
+
     result = {
         "compile_ok": compile_ok,
         "bench_ok": bench_ok,
@@ -286,7 +351,9 @@ def fix_c_code(
         "llm_turns": llm_turns,
         "retries": total_retries,
         "compile_error": compile_error if not compile_ok else "",
+        "compile_commands": str(cc_path),
     }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
+    log.info("Stage complete")
     return result
 

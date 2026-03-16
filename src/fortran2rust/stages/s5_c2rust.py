@@ -5,6 +5,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ._log import make_stage_logger
+from ..exceptions import ConversionError
+
 CARGO_TOML_TEMPLATE = """\
 [package]
 name = "fortran2rust_output"
@@ -52,19 +55,47 @@ def ensure_c2rust(status_fn=None) -> Path:
 
 def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, status_fn=None) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    log = make_stage_logger(output_dir)
+    # c2rust requires absolute paths — relative paths cause a canonicalize panic
+    compile_commands = compile_commands.resolve()
+    output_dir_abs = output_dir.resolve()
+    log.info(f"transpile_to_rust: compile_commands={compile_commands}, output_dir={output_dir_abs}")
 
     if status_fn:
         status_fn("Transpiling C → Rust with c2rust…")
+    log.info("Running c2rust transpile")
     result = subprocess.run(
-        ["c2rust", "transpile", str(compile_commands), "--output-dir", str(output_dir)],
+        ["c2rust", "transpile", str(compile_commands), "--output-dir", str(output_dir_abs)],
         capture_output=True,
         text=True,
         timeout=600,
     )
     ok = result.returncode == 0
 
+    # Save full c2rust output as a standalone log file
+    (output_dir / "c2rust.log").write_text(
+        f"=== COMMAND ===\nc2rust transpile {compile_commands} --output-dir {output_dir_abs}\n\n"
+        f"=== STDOUT ===\n{result.stdout}\n"
+        f"=== STDERR ===\n{result.stderr}\n"
+        f"=== EXIT CODE: {result.returncode} ===\n"
+    )
+
     rust_files = sorted(output_dir.glob("**/*.rs"))
     rust_file_strs = [str(f) for f in rust_files]
+
+    if ok:
+        log.info(f"c2rust OK — generated {len(rust_files)} Rust files")
+    else:
+        log.warning(f"c2rust exited with non-zero code; generated {len(rust_files)} Rust files")
+        log.warning(result.stderr)
+
+    # c2rust producing no .rs files is always a hard failure regardless of exit code
+    if not rust_files:
+        first_error = next(
+            (line for line in result.stderr.splitlines() if line.strip()),
+            result.stderr[:200] or "c2rust produced no Rust files",
+        )
+        raise ConversionError("c2rust", first_error)
 
     if status_fn:
         status_fn(f"Generated {len(rust_files)} Rust files")
@@ -83,6 +114,7 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         lib_rs.write_text(
             f"#![allow(unused)]\n#![allow(non_snake_case)]\n#![allow(non_camel_case_types)]\n{mod_lines}\n"
         )
+        log.info(f"Scaffolded src/lib.rs with modules: {modules}")
 
     (output_dir / "c2rust_result.json").write_text(json.dumps({
         "ok": ok,
@@ -90,6 +122,7 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         "stdout": result.stdout,
     }, indent=2))
 
+    log.info("Stage complete")
     return {
         "rust_files": rust_file_strs,
         "cargo_toml": str(cargo_toml_path),

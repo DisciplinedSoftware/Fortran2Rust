@@ -146,6 +146,33 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
 
                 console.print(f"  [green]✓ Stage {stage_num} complete[/green]")
 
+                if stage_num == 4:
+                    bench_results = results[4].get("bench_results", {})
+                    if bench_results:
+                        fortran_times = {
+                            fn: results.get(2, {}).get("benchmarks", {}).get(fn, {}).get("time_ms")
+                            for fn in bench_results
+                        }
+                        parts = []
+                        for fn, br in bench_results.items():
+                            diff = br.get("max_abs_diff", 0.0)
+                            diff_str = f"Δ={diff:.2e}"
+                            c_ms = br.get("c_time_ms")
+                            f_ms = fortran_times.get(fn)
+                            if c_ms is not None and f_ms:
+                                ratio = c_ms / f_ms
+                                timing_str = f"C:{c_ms:.1f}ms, {ratio:.2f}x Fortran"
+                            elif c_ms is not None:
+                                timing_str = f"C:{c_ms:.1f}ms"
+                            else:
+                                timing_str = None
+                            detail = f"{diff_str}, {timing_str}" if timing_str else diff_str
+                            if br.get("pass"):
+                                parts.append(f"[green]{fn}[/green] ✓ ({detail})")
+                            else:
+                                parts.append(f"[red]{fn}[/red] ✗ ({detail})")
+                        console.print(f"  Benchmarks: {' | '.join(parts)}")
+
             except Exception as e:
                 console.print(f"  [red]✗ Stage {stage_num} failed: {e}[/red]")
                 results[stage_num] = {"error": str(e)}
