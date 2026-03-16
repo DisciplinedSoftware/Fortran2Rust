@@ -502,7 +502,7 @@ def fix_c_code(
     bench_ok = False
     bench_results: dict = {}
     if compile_ok:
-        bench_c_files = sorted(output_dir.glob("bench_*.c"))
+        bench_c_files = sorted(f for f in output_dir.glob("bench_*.c") if not f.stem.endswith("_precision"))
         if not bench_c_files:
             bench_ok = True  # nothing to benchmark
         else:
