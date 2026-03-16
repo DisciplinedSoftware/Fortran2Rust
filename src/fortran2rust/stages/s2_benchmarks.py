@@ -158,8 +158,9 @@ def _make_dgemm_precision_driver(fn_name: str, N: int) -> str:
 
       CALL {fn_up}('N','N',N,N,N,ALPHA,A,N,B,N,BETA,C,N)
 
-      OPEN(13, FILE='bench_{fn_lo}_precision_output.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='REPLACE')
+      OPEN(13, FILE='bench_{fn_lo}_precision_output.bin',
+     $     FORM='UNFORMATTED', ACCESS='STREAM',
+     $     STATUS='REPLACE')
       WRITE(13) C
       CLOSE(13)
 
