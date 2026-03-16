@@ -229,7 +229,10 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
     stage_log = _collect_stage_log(run_dir, stage_results)
     stages_completed = sum(1 for s in stage_log if s["ok"])
     llm_turns_total = sum(s["llm_turns"] for s in stage_log)
-    overall_ok = all(s["ok"] for s in stage_log)
+    overall_ok = (
+        all(s["ok"] for s in stage_log)
+        and all(row["status"] == "pass" for row in comparison_table)
+    )
     log.info(f"Stages completed: {stages_completed}/{len(STAGE_NAMES)}, LLM turns: {llm_turns_total}, overall: {'PASS' if overall_ok else 'FAIL'}")
 
     summary = {

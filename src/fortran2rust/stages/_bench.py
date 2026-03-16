@@ -179,6 +179,18 @@ def run_rust_benchmarks(
     Returns {fn_name: {run_ok, time_ms, max_abs_diff, run_error}}.
     """
     src_dir = output_dir / "src"
+
+    # Copy pre-generated Rust bench files from baseline_dir (stage 2) to src_dir,
+    # replacing any c2rust-generated counterparts.  The stage-2 files include
+    # no-op stubs for f2c Fortran I/O symbols (s_wsfe, do_fio, …) that are
+    # undefined in the rlib, which would otherwise cause binary link failures.
+    if baseline_dir and baseline_dir.is_dir():
+        src_dir.mkdir(parents=True, exist_ok=True)
+        for rs in sorted(baseline_dir.glob("bench_*.rs")):
+            dest = src_dir / rs.name
+            shutil.copy(rs, dest)
+            log.info(f"Using stage-2 pre-generated Rust bench: {rs.name}")
+
     bench_rs_files = sorted(src_dir.glob("bench_*.rs")) if src_dir.is_dir() else []
     if not bench_rs_files:
         return {}
@@ -228,7 +240,7 @@ def run_rust_benchmarks(
         capture_output=True, text=True, timeout=300,
     )
     if br.returncode != 0:
-        log.warning(f"cargo build --bins failed:\n{br.stderr[:1000]}")
+        log.warning(f"cargo build --bins failed:\n{br.stderr[:3000]}")
         return {}
 
     # Copy dataset files so the bench binary can read them from output_dir
