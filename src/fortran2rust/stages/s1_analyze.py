@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from ._log import make_stage_logger
@@ -10,99 +11,119 @@ from ._log import make_stage_logger
 logger = logging.getLogger(__name__)
 
 
-def _parse_file(path: Path):
-    from fparser.two.parser import ParserFactory
-    from fparser.common.readfortran import FortranFileReader
+# ---------------------------------------------------------------------------
+# Worker function — runs in a child process.
+# Must be a module-level function so ProcessPoolExecutor can pickle it.
+# Returns only plain data (strings/tuples) so no fparser objects cross the
+# process boundary.
+# ---------------------------------------------------------------------------
 
-    reader = FortranFileReader(str(path), ignore_comments=True)
+def _parse_and_extract(path_str: str) -> tuple[str, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Parse one Fortran file and return its definitions and call edges.
+
+    Returns:
+        (path_str,
+         name_entries: list of (func_name_upper, path_str),
+         call_edges:   list of (caller_upper, callee_upper))
+
+    An empty pair of lists is returned when parsing fails.
+    """
+    import warnings
+    from fparser.common.readfortran import FortranFileReader
+    from fparser.two import Fortran2003
+    from fparser.two.parser import ParserFactory
+    from fparser.two.utils import walk
+
+    reader = FortranFileReader(path_str, ignore_comments=True)
     parser = ParserFactory().create(std="f2003")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            return parser(reader)
-    except Exception as e:
-        logger.warning(f"Failed to parse {path}: {e}")
-        return None
+            tree = parser(reader)
+    except Exception as exc:
+        logger.warning(f"Failed to parse {path_str}: {exc}")
+        return path_str, [], []
 
+    name_entries: list[tuple[str, str]] = []
+    call_edges: list[tuple[str, str]] = []
+
+    for subprog in walk(tree, (Fortran2003.Subroutine_Subprogram,
+                               Fortran2003.Function_Subprogram)):
+        stmts = (walk(subprog, Fortran2003.Subroutine_Stmt)
+                 or walk(subprog, Fortran2003.Function_Stmt))
+        if not stmts:
+            continue
+        name = str(stmts[0].items[1]).upper()
+        name_entries.append((name, path_str))
+
+        calls: set[str] = set()
+        for node in walk(subprog, Fortran2003.Call_Stmt):
+            calls.add(str(node.items[0]).upper())
+        for ref in walk(subprog, Fortran2003.Part_Ref):
+            calls.add(str(ref.items[0]).upper())
+        for ref in walk(subprog, Fortran2003.Function_Reference):
+            calls.add(str(ref.items[0]).upper())
+        for ref in walk(subprog, Fortran2003.Structure_Constructor):
+            calls.add(str(ref.items[0]).upper())
+        for callee in calls:
+            call_edges.append((name, callee))
+
+    return path_str, name_entries, call_edges
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def list_entry_points(source_dir: Path, status_fn=None) -> list[str]:
-    from fparser.two import Fortran2003
-    from fparser.two.utils import walk
+    all_files = sorted(f for f in source_dir.glob("*.f") if not f.name.startswith("."))
+    if not all_files:
+        return []
 
-    names = []
-    for f in sorted(f for f in source_dir.glob("*.f") if not f.name.startswith(".")):
-        if status_fn:
-            status_fn(f"Parsing {f.name}…")
-        tree = _parse_file(f)
-        if tree is None:
-            continue
-        for node in walk(tree, Fortran2003.Subroutine_Stmt):
-            names.append(str(node.items[1]))
-        for node in walk(tree, Fortran2003.Function_Stmt):
-            names.append(str(node.items[1]))
+    if status_fn:
+        status_fn(f"Parsing {len(all_files)} Fortran file(s) (parallel)…")
+
+    names: list[str] = []
+    with ProcessPoolExecutor() as executor:
+        for _path, name_entries, _edges in executor.map(
+            _parse_and_extract, [str(f) for f in all_files]
+        ):
+            names.extend(n for n, _ in name_entries)
+
     return sorted(set(names))
 
 
 def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: Path, status_fn=None) -> dict:
-    from fparser.two import Fortran2003
-    from fparser.two.utils import walk
-
     log = make_stage_logger(output_dir)
     log.info(f"analyze_dependencies: source_dir={source_dir}, entry_points={entry_points}")
+
+    all_files = sorted(f for f in source_dir.glob("*.f") if not f.name.startswith("."))
+
+    if status_fn:
+        status_fn(f"Parsing {len(all_files)} Fortran file(s) (parallel)…")
+    log.info(f"Parsing {len(all_files)} Fortran source files in parallel")
 
     # Map: function_name (upper) -> source file path
     name_to_file: dict[str, Path] = {}
     # Map: function_name (upper) -> set of called function names (upper)
     call_graph: dict[str, set[str]] = {}
 
-    all_files = sorted(f for f in source_dir.glob("*.f") if not f.name.startswith("."))
+    with ProcessPoolExecutor() as executor:
+        for path_str, name_entries, call_edges in executor.map(
+            _parse_and_extract, [str(f) for f in all_files]
+        ):
+            f = Path(path_str)
+            for name, _ in name_entries:
+                existing = name_to_file.get(name)
+                # Prefer the file whose stem matches the function name.
+                if existing is None or f.stem.upper() == name:
+                    name_to_file[name] = f
+            for caller, callee in call_edges:
+                if caller not in call_graph:
+                    call_graph[caller] = set()
+                call_graph[caller].add(callee)
 
-    if status_fn:
-        status_fn(f"Scanning {len(all_files)} Fortran files…")
-    log.info(f"Scanning {len(all_files)} Fortran source files")
-
-    for i, f in enumerate(all_files):
-        if status_fn:
-            status_fn(f"Parsing {f.name} ({i+1}/{len(all_files)})…")
-        tree = _parse_file(f)
-        if tree is None:
-            log.warning(f"Failed to parse {f.name} — skipping")
-            continue
-
-        # Process each subprogram separately for accurate per-function call attribution
-        for subprog in walk(tree, (Fortran2003.Subroutine_Subprogram,
-                                   Fortran2003.Function_Subprogram)):
-            stmts = walk(subprog, Fortran2003.Subroutine_Stmt) or walk(subprog, Fortran2003.Function_Stmt)
-            if not stmts:
-                continue
-            name = str(stmts[0].items[1]).upper()
-            # Prefer the file whose stem matches the function name (e.g. xerbla.f for XERBLA).
-            # This prevents test/combined files (e.g. zblat3.f) from overwriting a
-            # proper single-routine file even if they also define the same symbol.
-            existing = name_to_file.get(name)
-            if existing is None or f.stem.upper() == name:
-                name_to_file[name] = f
-
-            calls: set[str] = set()
-            # Subroutine calls: CALL FOO(...)
-            for call_node in walk(subprog, Fortran2003.Call_Stmt):
-                calls.add(str(call_node.items[0]).upper())
-            # Function calls in expressions: FOO(...) — same syntax as array access,
-            # so we collect all Part_Ref names and filter to known defined names in BFS.
-            for ref in walk(subprog, Fortran2003.Part_Ref):
-                calls.add(str(ref.items[0]).upper())
-            # Explicit Function_Reference nodes
-            for ref in walk(subprog, Fortran2003.Function_Reference):
-                calls.add(str(ref.items[0]).upper())
-            # EXTERNAL functions are parsed as Structure_Constructor by fparser2
-            # (e.g. LSAME(TRANSA,'N') when LSAME is declared EXTERNAL).
-            # items[0] is a Type_Name whose text is the function name.
-            for ref in walk(subprog, Fortran2003.Structure_Constructor):
-                calls.add(str(ref.items[0]).upper())
-
-            if name not in call_graph:
-                call_graph[name] = set()
-            call_graph[name].update(calls)
+    log.info(f"Parsed {len(all_files)} files; found {len(name_to_file)} definitions")
 
     # BFS from entry points to find all reachable functions/files
     ep_upper = [ep.upper() for ep in entry_points]
