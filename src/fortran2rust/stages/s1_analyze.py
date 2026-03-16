@@ -62,29 +62,22 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
         if tree is None:
             continue
 
-        # Collect all subroutines/functions defined in this file
-        defined_in_file: list[str] = []
-        for node in walk(tree, Fortran2003.Subroutine_Stmt):
-            name = str(node.items[1]).upper()
+        # Process each subprogram separately for accurate per-function call attribution
+        for subprog in walk(tree, (Fortran2003.Subroutine_Subprogram,
+                                   Fortran2003.Function_Subprogram)):
+            stmts = walk(subprog, Fortran2003.Subroutine_Stmt) or walk(subprog, Fortran2003.Function_Stmt)
+            if not stmts:
+                continue
+            name = str(stmts[0].items[1]).upper()
             name_to_file[name] = f
-            defined_in_file.append(name)
-        for node in walk(tree, Fortran2003.Function_Stmt):
-            name = str(node.items[1]).upper()
-            name_to_file[name] = f
-            defined_in_file.append(name)
 
-        # Collect all calls made in this file
-        calls_in_file: set[str] = set()
-        for node in walk(tree, Fortran2003.Call_Stmt):
-            # Call_Stmt: items[0] is the procedure name
-            called = str(node.items[0]).upper()
-            calls_in_file.add(called)
+            calls: set[str] = set()
+            for call_node in walk(subprog, Fortran2003.Call_Stmt):
+                calls.add(str(call_node.items[0]).upper())
 
-        # Attribute calls to each defined function (conservative: all calls in file attributed to all functions)
-        for name in defined_in_file:
             if name not in call_graph:
                 call_graph[name] = set()
-            call_graph[name].update(calls_in_file)
+            call_graph[name].update(calls)
 
     # BFS from entry points to find all reachable functions/files
     ep_upper = [ep.upper() for ep in entry_points]
@@ -106,6 +99,15 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
 
     if status_fn:
         status_fn(f"Found {len(reachable_files)} source files, {len(reachable_functions)} functions")
+
+    # Print summary of functions that will be converted
+    from rich.columns import Columns
+    from rich.console import Console
+    from rich.text import Text
+    _con = Console()
+    _con.print("\n[bold]Functions to be converted:[/bold]")
+    _con.print(Columns([Text(fn, style="yellow") for fn in reachable_functions], equal=True, expand=False))
+    _con.print()
 
     # Build serializable call graph (sets -> lists)
     serializable_cg = {k: sorted(v) for k, v in call_graph.items() if k in visited}
