@@ -275,19 +275,16 @@ def _make_dgemm_driver(fn_name: str, N: int, prec: _Precision) -> str:
       DOUBLE PRECISION :: ELAPSED
       INTEGER :: I, J
 
-      ! Load shared dataset (raw binary, column-major)
-            OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED',
-        $     ACCESS='STREAM', STATUS='OLD')
+    ! Load shared dataset (raw binary, column-major)
+    OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(10) A
       CLOSE(10)
 
-            OPEN(11, FILE='dataset_{fn_lo}_B.bin', FORM='UNFORMATTED',
-        $     ACCESS='STREAM', STATUS='OLD')
+    OPEN(11, FILE='dataset_{fn_lo}_B.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(11) B
       CLOSE(11)
 
-            OPEN(12, FILE='dataset_{fn_lo}_params.bin', FORM='UNFORMATTED',
-        $     ACCESS='STREAM', STATUS='OLD')
+    OPEN(12, FILE='dataset_{fn_lo}_params.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(12) ALPHA
       READ(12) BETA
       CLOSE(12)
@@ -307,9 +304,8 @@ def _make_dgemm_driver(fn_name: str, N: int, prec: _Precision) -> str:
       CALL SYSTEM_CLOCK(T2)
       ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
 
-      ! Write output (column-major raw binary for numpy comparison)
-            OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED',
-        $     ACCESS='STREAM', STATUS='REPLACE')
+    ! Write output (column-major raw binary for numpy comparison)
+    OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
       WRITE(13) C
       CLOSE(13)
 
@@ -336,13 +332,11 @@ def _make_dgemm_precision_driver(fn_name: str, N: int, prec: _Precision) -> str:
       ALPHA = {one}
       BETA = {zero}
 
-      ! Load shared near-cancellation dataset (same data used by C and Rust)
-            OPEN(10, FILE='dataset_{fn_lo}_precision_A.bin', FORM='UNFORMATTED',
-        $     ACCESS='STREAM', STATUS='OLD')
+    ! Load shared near-cancellation dataset (same data used by C and Rust)
+    OPEN(10, FILE='dataset_{fn_lo}_precision_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(10) A
       CLOSE(10)
-            OPEN(11, FILE='dataset_{fn_lo}_precision_B.bin', FORM='UNFORMATTED',
-        $     ACCESS='STREAM', STATUS='OLD')
+    OPEN(11, FILE='dataset_{fn_lo}_precision_B.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(11) B
       CLOSE(11)
 
@@ -354,9 +348,7 @@ def _make_dgemm_precision_driver(fn_name: str, N: int, prec: _Precision) -> str:
 
       CALL {fn_up}('N','N',N,N,N,ALPHA,A,N,B,N,BETA,C,N)
 
-      OPEN(13, FILE='bench_{fn_lo}_precision_output.bin',
-     $     FORM='UNFORMATTED', ACCESS='STREAM',
-     $     STATUS='REPLACE')
+    OPEN(13, FILE='bench_{fn_lo}_precision_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
       WRITE(13) C
       CLOSE(13)
 
@@ -471,12 +463,10 @@ def _make_generic_driver(fn_name: str, N: int,
       DOUBLE PRECISION :: ELAPSED
       INTEGER :: I, J
 
-      OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='OLD')
+    OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(10) A
       CLOSE(10)
-      OPEN(11, FILE='dataset_{fn_lo}_B.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='OLD')
+    OPEN(11, FILE='dataset_{fn_lo}_B.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(11) B
       CLOSE(11)
 
@@ -497,8 +487,7 @@ def _make_generic_driver(fn_name: str, N: int,
       CALL SYSTEM_CLOCK(T2)
       ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
 
-      OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED',
-     $     ACCESS='STREAM', STATUS='REPLACE')
+    OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
       WRITE(13) C
       CLOSE(13)
 
@@ -548,9 +537,7 @@ def _make_generic_driver(fn_name: str, N: int,
                 decls.append(f"      {ptype} :: {bvar}(N,N)")
                 ds = "A" if arr_idx == 0 else "B"
                 file_opens.append(
-                    f"      OPEN({file_n}, FILE='dataset_{fn_lo}_{ds}.bin',"
-                    f" FORM='UNFORMATTED',\n"
-                    f"     $     ACCESS='STREAM', STATUS='OLD')\n"
+                    f"      OPEN({file_n}, FILE='dataset_{fn_lo}_{ds}.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')\n"
                     f"      READ({file_n}) {bvar}\n"
                     f"      CLOSE({file_n})"
                 )
@@ -597,8 +584,7 @@ def _make_generic_driver(fn_name: str, N: int,
     output_block = ""
     if out_var:
         output_block = (
-            f"      OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED',\n"
-            f"     $     ACCESS='STREAM', STATUS='REPLACE')\n"
+            f"      OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')\n"
             f"      WRITE(13) {out_var}\n"
             f"      CLOSE(13)\n"
         )
@@ -1412,8 +1398,8 @@ def generate_benchmarks(
         sig  = ep_sig[ep]
         dataset_paths = {k: Path(v) for k, v in all_datasets[ep].items()}
 
-        driver_ext = ".f"
-        precision_ext = ".f"
+        driver_ext = ".f90"
+        precision_ext = ".f90"
 
         if ep_upper in KNOWN_GEMM:
             driver_src      = _make_dgemm_driver(ep, N, prec)
