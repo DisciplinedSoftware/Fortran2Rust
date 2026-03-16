@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
-from ._bench import print_bench_summary, run_rust_benchmarks
+from ._bench import _fix_duplicate_no_mangle, _fix_stable_rust_features, print_bench_summary, run_rust_benchmarks
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -82,6 +82,7 @@ def make_idiomatic(
         llm_log.append({"phase": "idiomatic", "file": rs_file.name})
         llm_turns += 1
         _apply_llm_response(response, rs_file)
+        _fix_stable_rust_features(rs_file)  # LLM sometimes re-adds stabilised feature flags
 
         build_ok, build_output = _cargo_build(cargo_toml)
         with open(cargo_build_log, "a") as fh:
@@ -93,6 +94,17 @@ def make_idiomatic(
             if build_ok:
                 log.info(f"  cargo build OK after idiomatic rewrite of {rs_file.name}")
                 break
+            # Try deterministic fixes before spending an LLM turn
+            if _fix_duplicate_no_mangle(rs_file, build_output):
+                log.info(f"  Fixed duplicate #[no_mangle] in {rs_file.name} without LLM")
+                build_ok, build_output = _cargo_build(cargo_toml)
+                with open(cargo_build_log, "a") as fh:
+                    fh.write(
+                        f"=== {rs_file.name} dedup fix ===\n"
+                        f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+                    )
+                if build_ok:
+                    break
             _console.print(
                 f"  [yellow]⚠ Idiomatic Rust build failed[/yellow] in [bold]{rs_file.name}[/bold]: "
                 f"[dim]{_first_error_line(build_output)}[/dim]"
@@ -109,6 +121,7 @@ def make_idiomatic(
             llm_turns += 1
             retries += 1
             _apply_llm_response(repair_response, rs_file)
+            _fix_stable_rust_features(rs_file)
             build_ok, build_output = _cargo_build(cargo_toml)
             with open(cargo_build_log, "a") as fh:
                 fh.write(

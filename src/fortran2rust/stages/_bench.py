@@ -45,6 +45,59 @@ def _fix_stable_rust_features(rs_file: Path) -> None:
         rs_file.write_text(new_text)
 
 
+def _fix_duplicate_no_mangle(rs_file: Path, build_output: str) -> bool:
+    """
+    Remove ``#[no_mangle]`` from functions in *rs_file* that cause duplicate-
+    symbol linker errors because the real definition lives in another module.
+
+    When an LLM rewrites a file it sometimes copies helper functions (e.g.
+    ``lsame_``, ``xerbla_``) inline and marks them ``#[no_mangle]``.  That
+    conflicts with the original ``#[no_mangle]`` definition in their own
+    module (``lsame.rs``, ``xerbla.rs``).  Dropping ``#[no_mangle]`` from
+    the duplicate turns it into a private Rust helper with a mangled name,
+    eliminating the linker conflict while preserving the call semantics.
+
+    Handles both linker error formats:
+    - ``error: symbol `X` is already defined``
+    - ``multiple definition of `X```
+
+    Returns True if the file was modified.
+    """
+    symbols: set[str] = set()
+    for pattern in (
+        r"symbol [`']([^`'\s]+)[`'] is already defined",
+        r"multiple definition of [`']([^`'\s]+)[`']",
+    ):
+        symbols.update(re.findall(pattern, build_output))
+    if not symbols:
+        return False
+
+    lines = rs_file.read_text().splitlines(keepends=True)
+    new_lines: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped == "#[no_mangle]":
+            # Look past any additional attribute lines to find the fn signature
+            j = i + 1
+            while j < len(lines) and lines[j].strip().startswith("#["):
+                j += 1
+            if j < len(lines) and any(
+                re.search(r"\bfn\s+" + re.escape(sym) + r"\b", lines[j])
+                for sym in symbols
+            ):
+                changed = True  # drop this #[no_mangle] line
+                i += 1
+                continue
+        new_lines.append(lines[i])
+        i += 1
+
+    if changed:
+        rs_file.write_text("".join(new_lines))
+    return changed
+
+
 def _fix_bench_extern_types(bench_rs: Path) -> None:
     """
     Patch a c2rust-transpiled bench_*.rs for stable-Rust compatibility.

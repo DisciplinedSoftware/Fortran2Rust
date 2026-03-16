@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
-from ._bench import _fix_bench_extern_types, _fix_stable_rust_features, print_bench_summary, run_rust_benchmarks
+from ._bench import _fix_bench_extern_types, _fix_duplicate_no_mangle, _fix_stable_rust_features, print_bench_summary, run_rust_benchmarks
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -100,6 +100,7 @@ def make_safe(
         llm_log.append({"phase": "safe", "file": str(rs_file.name), "unsafe_count": _count_unsafe(content)})
         llm_turns += 1
         _apply_llm_response(response, rs_file)
+        _fix_stable_rust_features(rs_file)  # LLM sometimes re-adds stabilised feature flags
 
         # Verify build after each file
         build_ok, build_output = _cargo_build(cargo_toml)
@@ -112,6 +113,17 @@ def make_safe(
             if build_ok:
                 log.info(f"  cargo build OK after removing unsafe from {rs_file.name}")
                 break
+            # Try deterministic fixes before spending an LLM turn
+            if _fix_duplicate_no_mangle(rs_file, build_output):
+                log.info(f"  Fixed duplicate #[no_mangle] in {rs_file.name} without LLM")
+                build_ok, build_output = _cargo_build(cargo_toml)
+                with open(cargo_build_log, "a") as fh:
+                    fh.write(
+                        f"=== {rs_file.name} dedup fix ===\n"
+                        f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+                    )
+                if build_ok:
+                    break
             _console.print(
                 f"  [yellow]⚠ Safe Rust build failed[/yellow] in [bold]{rs_file.name}[/bold]: "
                 f"[dim]{_first_error_line(build_output)}[/dim]"
@@ -128,6 +140,7 @@ def make_safe(
             llm_turns += 1
             retries += 1
             _apply_llm_response(repair_response, rs_file)
+            _fix_stable_rust_features(rs_file)
             build_ok, build_output = _cargo_build(cargo_toml)
             with open(cargo_build_log, "a") as fh:
                 fh.write(
