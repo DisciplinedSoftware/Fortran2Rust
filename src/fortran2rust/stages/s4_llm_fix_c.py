@@ -338,6 +338,26 @@ def _compile_c(c_dir: Path) -> tuple[bool, str]:
     return all_ok, "\n".join(chunks)
 
 
+def _find_fortran_source_for_function(src_dir: Path, fn_name: str) -> str | None:
+    """Given a function name, find and extract its Fortran source from the library.
+
+    Returns the Fortran source code if found, None otherwise.
+    """
+    # Try to find .f files in the source directory
+    for f_file in src_dir.glob("*.f"):
+        try:
+            content = f_file.read_text(errors="ignore")
+            # Look for a subroutine or function definition with this name
+            # Case-insensitive search
+            pattern = rf"(?:subroutine|function)\s+{re.escape(fn_name)}\b"
+            if re.search(pattern, content, re.IGNORECASE):
+                return content
+        except Exception:
+            pass
+
+    return None
+
+
 def _is_non_repairable_bench_error(error: str) -> bool:
     """Return True for benchmark failures that LLM source edits cannot fix."""
     text = (error or "").lower()
@@ -815,19 +835,34 @@ def _restore_c_after_llm(content: str, preserved_banner: str) -> str:
     return f"{preserved_banner}\n\n{restored}".strip()
 
 
-def _repair_file(llm: "LLMClient", failing_file: Path, error: str, attempt: int = 0) -> bool:
+def _repair_file(
+    llm: "LLMClient",
+    failing_file: Path,
+    error: str,
+    attempt: int = 0,
+    fortran_source: str | None = None,
+) -> bool:
     """Ask LLM to fix one specific file and write it back.
 
     Returns True when file content changed, False otherwise.
     """
     original = failing_file.read_text()
     compact_code, preserved_banner = _compact_c_for_llm(original)
+
+    # Build context with optional Fortran reference
+    context = (
+        "Fix this C file produced by the f2c Fortran-to-C transpiler. "
+        "Leading documentation comments were removed before sending to reduce token usage. "
+        "Return ONLY the complete corrected C file contents, no explanation."
+    )
+    if fortran_source:
+        context += (
+            "\n\nFor reference, here is the original Fortran code that this C file implements:\n"
+            f"{fortran_source}"
+        )
+
     response = llm.repair(
-        context=(
-            "Fix this C file produced by the f2c Fortran-to-C transpiler. "
-            "Leading documentation comments were removed before sending to reduce token usage. "
-            "Return ONLY the complete corrected C file contents, no explanation."
-        ),
+        context=context,
         error=error,
         code=compact_code,
         attempt=attempt,
@@ -970,7 +1005,24 @@ def fix_c_code(
             if status_fn:
                 status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
             log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
-            return _repair_file(llm, target, filter_errors_for_file(compile_output, target.name), attempt=attempt)
+
+            # Try to find the corresponding Fortran source file
+            # C files from f2c often have similar names (e.g., dgemm.c from dgemm.f)
+            fortran_src = None
+            stem = target.stem
+            for ext in [".f", ".F"]:
+                f_file = c_dir / (stem + ext)
+                if f_file.exists():
+                    fortran_src = f_file.read_text(errors="ignore")
+                    break
+
+            return _repair_file(
+                llm,
+                target,
+                filter_errors_for_file(compile_output, target.name),
+                attempt=attempt,
+                fortran_source=fortran_src,
+            )
 
         with ThreadPoolExecutor(max_workers=len(failing_files)) as executor:
             changed_flags = list(executor.map(_fix_one, failing_files))
@@ -1096,7 +1148,16 @@ def fix_c_code(
                     if status_fn:
                         status_fn(f"LLM: fixing numerical precision in {bench_c.name} (attempt {b_attempt+1}/{max_retries})…")
                     log.info(f"LLM bench repair attempt {b_attempt+1}/{max_retries} for {bench_c.name}")
-                    _repair_file(llm, bench_c, filter_errors_for_file(err, bench_c.name), attempt=b_attempt)
+
+                    # Try to find the original Fortran source for context
+                    fortran_src = _find_fortran_source_for_function(c_dir, fn_name)
+                    _repair_file(
+                        llm,
+                        bench_c,
+                        filter_errors_for_file(err, bench_c.name),
+                        attempt=b_attempt,
+                        fortran_source=fortran_src,
+                    )
                     llm_turns += 1
                     total_retries += 1
                     ok, err, c_bin, c_time_ms = _compile_and_run_bench(
