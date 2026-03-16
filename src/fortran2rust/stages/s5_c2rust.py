@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from ._log import make_stage_logger
+from ._bench import _fix_stable_rust_features
 from ..exceptions import ConversionError
 
 CARGO_TOML_TEMPLATE = """\
@@ -118,6 +119,10 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         f"#![allow(unused)]\n#![allow(non_snake_case)]\n#![allow(non_camel_case_types)]\n\n{mod_lines}\n"
     )
     log.info(f"Wrote src/lib.rs with modules: {modules}")
+
+    # Strip known-stable feature flags (e.g. raw_ref_op) to avoid E0554 on stable Rust.
+    for rs in rust_files:
+        _fix_stable_rust_features(rs)
 
     (output_dir / "c2rust_result.json").write_text(json.dumps({
         "ok": ok,

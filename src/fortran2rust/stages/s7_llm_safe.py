@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
 from ..exceptions import CompilationError, MaxRetriesExceededError
-from ._bench import print_bench_summary, run_rust_benchmarks
+from ._bench import _fix_bench_extern_types, _fix_stable_rust_features, print_bench_summary, run_rust_benchmarks
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
@@ -65,6 +65,15 @@ def make_safe(
 
     if output_dir != rust_dir:
         shutil.copytree(rust_dir, output_dir, dirs_exist_ok=True)
+
+    # Patch c2rust extern types before the first build to avoid a wasted LLM retry.
+    src_dir = output_dir / "src"
+    for bench_rs in sorted(src_dir.glob("bench_*.rs")):
+        _fix_bench_extern_types(bench_rs)
+        log.info(f"Pre-patched extern types in {bench_rs.name}")
+    for rs in sorted(src_dir.glob("*.rs")):
+        _fix_stable_rust_features(rs)
+        log.info(f"Stripped stable feature flags from {rs.name}")
 
     cargo_toml = output_dir / "Cargo.toml"
     cargo_build_log = output_dir / "cargo_build.log"

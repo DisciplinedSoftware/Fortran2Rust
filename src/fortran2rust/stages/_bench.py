@@ -17,6 +17,34 @@ _console = Console(stderr=True)
 _CRATE_NAME = "fortran2rust_output"
 
 
+# Features that c2rust emits but that have since been stabilised.
+# Keeping them on a stable toolchain raises E0554.
+_STABLE_FEATURES: frozenset[str] = frozenset({"raw_ref_op"})
+
+
+def _fix_stable_rust_features(rs_file: Path) -> None:
+    """
+    Strip known-stabilised feature flags from a c2rust-generated .rs file.
+
+    c2rust emits ``#![feature(raw_ref_op)]`` (stabilised in Rust 1.82) and
+    potentially others.  Using ``#![feature(...)]`` on a stable toolchain
+    raises E0554.  Entries in ``_STABLE_FEATURES`` are removed; the entire
+    attribute is dropped when the list becomes empty.
+
+    The transformation is idempotent.
+    """
+    text = rs_file.read_text()
+
+    def _strip(m: re.Match) -> str:
+        flags = [f.strip() for f in m.group(1).split(",")
+                 if f.strip() and f.strip() not in _STABLE_FEATURES]
+        return f'#![feature({", ".join(flags)})]' if flags else ""
+
+    new_text = re.sub(r"#!\[feature\(([^)]*)\)\]", _strip, text)
+    if new_text != text:
+        rs_file.write_text(new_text)
+
+
 def _fix_bench_extern_types(bench_rs: Path) -> None:
     """
     Patch a c2rust-transpiled bench_*.rs for stable-Rust compatibility.
@@ -25,7 +53,7 @@ def _fix_bench_extern_types(bench_rs: Path) -> None:
     (``_IO_wide_data``, ``_IO_codecvt``, ``_IO_marker`` …).  This function
     replaces them with ``#[repr(C)] struct`` declarations so the file
     compiles on stable Rust, and removes ``extern_types`` from the feature
-    list (leaving any other features, e.g. ``raw_ref_op``, intact).
+    list (leaving any remaining unstable features intact).
 
     The transformation is idempotent — if the file was already patched it
     returns immediately.
