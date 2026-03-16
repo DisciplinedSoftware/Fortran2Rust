@@ -149,7 +149,7 @@ _S4_REPORT_MD = """# Stage 4 — Fortran vs C Comparison
 {% if bench_rows %}
 ## Numerical Accuracy & Performance
 
-| Function | Fortran (ms) | C (ms) | C / Fortran | Max \|Δ\| | Status |
+| Function | Fortran (ms) | C (ms) | C / Fortran | Max \\|Δ\\| | Status |
 |----------|-------------|--------|------------|--------|--------|
 {% for row in bench_rows %}| {{ row.function }} | {{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.1f" | format(row.c_ms) if row.c_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.ratio) if row.ratio is not none else "N/A" }} | {{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }} | {{ "PASS" if row.pass else "FAIL" }} |
 {% endfor %}
