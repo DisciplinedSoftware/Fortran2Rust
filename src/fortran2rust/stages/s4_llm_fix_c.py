@@ -4,10 +4,12 @@ import json
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from jinja2 import BaseLoader, Environment
 from rich.console import Console
 
 if TYPE_CHECKING:
@@ -17,6 +19,241 @@ from ..exceptions import CompilationError, MaxRetriesExceededError, NumericalPre
 from ._log import make_stage_logger
 
 _console = Console(stderr=True)
+
+_S4_REPORT_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stage 4 — Fortran vs C Comparison</title>
+<style>
+:root {
+  --primary: #007AC3;
+  --navy: #1B3C6E;
+  --bg: #F4F7FB;
+  --amber: #F0AB00;
+  --success: #00A550;
+  --danger: #E31937;
+  --text: #1A1A1A;
+}
+body { font-family: Inter, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; }
+header { background: var(--navy); color: white; padding: 1.5rem 2rem; }
+header h1 { margin: 0 0 0.25rem 0; font-size: 1.75rem; }
+header p { margin: 0; opacity: 0.8; font-size: 0.9rem; }
+.card { background: white; border-radius: 8px; padding: 1.5rem; margin: 1rem 2rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.card h2 { margin-top: 0; color: var(--navy); border-bottom: 2px solid var(--primary); padding-bottom: 0.5rem; }
+table { width: 100%; border-collapse: collapse; }
+th { background: var(--navy); color: white; padding: 0.75rem; text-align: left; }
+td { padding: 0.6rem 0.75rem; border-bottom: 1px solid #e0e8f0; }
+tr:last-child td { border-bottom: none; }
+.pass { color: var(--success); font-weight: bold; }
+.fail { color: var(--danger); font-weight: bold; }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
+.metric { text-align: center; padding: 1rem; background: var(--bg); border-radius: 6px; }
+.metric .value { font-size: 2rem; font-weight: bold; color: var(--primary); }
+.metric .label { font-size: 0.8rem; color: #666; margin-top: 0.25rem; }
+.status-pass { background: #e8f7ef; color: var(--success); padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; }
+.status-fail { background: #fde8eb; color: var(--danger); padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; }
+.na { color: #aaa; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔬 Stage 4 — Fortran vs C Comparison</h1>
+  <p>{{ timestamp }}</p>
+</header>
+
+<div class="card">
+  <h2>Summary</h2>
+  <div class="summary-grid">
+    <div class="metric"><div class="value">{{ summary.functions_benchmarked }}</div><div class="label">Functions Benchmarked</div></div>
+    <div class="metric"><div class="value">{{ summary.functions_passed }}</div><div class="label">Numerical Checks Passed</div></div>
+    <div class="metric"><div class="value">{{ summary.llm_repairs }}</div><div class="label">LLM Repairs</div></div>
+    <div class="metric"><div class="value">{{ summary.fortran_loc }}</div><div class="label">Fortran LOC</div></div>
+    <div class="metric"><div class="value">{{ summary.c_loc }}</div><div class="label">C LOC</div></div>
+  </div>
+</div>
+
+{% if bench_rows %}
+<div class="card">
+  <h2>Numerical Accuracy &amp; Performance</h2>
+  <table>
+    <tr>
+      <th>Function</th>
+      <th>Fortran (ms)</th>
+      <th>C (ms)</th>
+      <th>C / Fortran</th>
+      <th>Max |Δ|</th>
+      <th>Status</th>
+    </tr>
+    {% for row in bench_rows %}
+    <tr>
+      <td><strong>{{ row.function }}</strong></td>
+      <td>{{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else '<span class="na">N/A</span>' }}</td>
+      <td>{{ "%.1f" | format(row.c_ms) if row.c_ms is not none else '<span class="na">N/A</span>' }}</td>
+      <td>
+        {% if row.ratio is not none %}
+          {% if row.ratio <= 1.05 %}<span class="pass">{{ "%.2fx" | format(row.ratio) }}</span>
+          {% elif row.ratio <= 2.0 %}<span style="color:var(--amber);font-weight:bold">{{ "%.2fx" | format(row.ratio) }}</span>
+          {% else %}<span class="fail">{{ "%.2fx" | format(row.ratio) }}</span>{% endif %}
+        {% else %}<span class="na">N/A</span>{% endif %}
+      </td>
+      <td>{{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else '<span class="na">N/A</span>' }}</td>
+      <td>{% if row.pass %}<span class="status-pass">PASS</span>{% else %}<span class="status-fail">FAIL</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if loc_rows %}
+<div class="card">
+  <h2>Code Size: Fortran vs C</h2>
+  <table>
+    <tr>
+      <th>Module</th>
+      <th>Fortran LOC</th>
+      <th>C LOC</th>
+      <th>Expansion</th>
+    </tr>
+    {% for row in loc_rows %}
+    <tr>
+      <td>{{ row.name }}</td>
+      <td>{{ row.fortran_loc if row.fortran_loc is not none else '<span class="na">—</span>' }}</td>
+      <td>{{ row.c_loc if row.c_loc is not none else '<span class="na">—</span>' }}</td>
+      <td>{% if row.ratio is not none %}{{ "%.1fx" | format(row.ratio) }}{% else %}<span class="na">—</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+</body>
+</html>"""
+
+_S4_REPORT_MD = """# Stage 4 — Fortran vs C Comparison
+
+**Generated:** {{ timestamp }}
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Functions Benchmarked | {{ summary.functions_benchmarked }} |
+| Numerical Checks Passed | {{ summary.functions_passed }} |
+| LLM Repairs | {{ summary.llm_repairs }} |
+| Fortran LOC (total) | {{ summary.fortran_loc }} |
+| C LOC (total) | {{ summary.c_loc }} |
+
+{% if bench_rows %}
+## Numerical Accuracy & Performance
+
+| Function | Fortran (ms) | C (ms) | C / Fortran | Max |Δ| | Status |
+|----------|-------------|--------|------------|--------|--------|
+{% for row in bench_rows %}| {{ row.function }} | {{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.1f" | format(row.c_ms) if row.c_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.ratio) if row.ratio is not none else "N/A" }} | {{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }} | {{ "PASS" if row.pass else "FAIL" }} |
+{% endfor %}
+{% endif %}
+{% if loc_rows %}
+## Code Size: Fortran vs C
+
+| Module | Fortran LOC | C LOC | Expansion |
+|--------|------------|-------|-----------|
+{% for row in loc_rows %}| {{ row.name }} | {{ row.fortran_loc if row.fortran_loc is not none else "—" }} | {{ row.c_loc if row.c_loc is not none else "—" }} | {{ "%.1fx" | format(row.ratio) if row.ratio is not none else "—" }} |
+{% endfor %}
+{% endif %}
+"""
+
+
+def _count_loc(path: Path) -> int:
+    """Count non-blank, non-comment source lines."""
+    lines = 0
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip Fortran-style comments (! or c/C in column 1) and C-style (//)
+            if stripped.startswith("!") or stripped.startswith("//"):
+                continue
+            if len(line) > 0 and line[0].lower() == "c" and (len(line) == 1 or not line[1].isalpha()):
+                continue
+            lines += 1
+    except Exception:
+        pass
+    return lines
+
+
+def _generate_fortran_c_report(
+    output_dir: Path,
+    fortran_dir: Path,
+    baseline_dir: Path,
+    bench_results: dict,
+    llm_turns: int,
+    total_retries: int,
+) -> None:
+    """Write fortran_c_comparison.{html,md} into output_dir."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Fortran baseline timing from s2 benchmarks.json
+    fortran_times: dict[str, float | None] = {}
+    bench_json = baseline_dir / "benchmarks.json"
+    if bench_json.exists():
+        try:
+            data = json.loads(bench_json.read_text()).get("benchmarks", {})
+            for fn, info in data.items():
+                fortran_times[fn] = info.get("time_ms")
+        except Exception:
+            pass
+
+    # Benchmark comparison rows
+    bench_rows = []
+    for fn, br in bench_results.items():
+        fortran_ms = fortran_times.get(fn)
+        c_ms = br.get("c_time_ms")
+        max_abs_diff = br.get("max_abs_diff")
+        passed = bool(br.get("pass"))
+        ratio = (c_ms / fortran_ms) if (c_ms is not None and fortran_ms) else None
+        bench_rows.append({
+            "function": fn,
+            "fortran_ms": fortran_ms,
+            "c_ms": c_ms,
+            "ratio": ratio,
+            "max_abs_diff": max_abs_diff,
+            "pass": passed,
+        })
+
+    # LOC comparison: match .f files in fortran_dir with .c files in output_dir (exclude bench_*)
+    loc_rows = []
+    f_files = {f.stem: f for f in sorted(fortran_dir.glob("*.f"))}
+    c_files = {f.stem: f for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")}
+    all_stems = sorted(set(f_files) | set(c_files))
+    for stem in all_stems:
+        f_loc = _count_loc(f_files[stem]) if stem in f_files else None
+        c_loc = _count_loc(c_files[stem]) if stem in c_files else None
+        ratio = (c_loc / f_loc) if (c_loc is not None and f_loc) else None
+        loc_rows.append({"name": stem, "fortran_loc": f_loc, "c_loc": c_loc, "ratio": ratio})
+
+    total_f_loc = sum(r["fortran_loc"] for r in loc_rows if r["fortran_loc"] is not None)
+    total_c_loc = sum(r["c_loc"] for r in loc_rows if r["c_loc"] is not None)
+
+    summary = {
+        "functions_benchmarked": len(bench_rows),
+        "functions_passed": sum(1 for r in bench_rows if r["pass"]),
+        "llm_repairs": total_retries,
+        "fortran_loc": total_f_loc,
+        "c_loc": total_c_loc,
+    }
+
+    ctx = {
+        "timestamp": timestamp,
+        "summary": summary,
+        "bench_rows": bench_rows,
+        "loc_rows": loc_rows,
+    }
+
+    env = Environment(loader=BaseLoader())
+    (output_dir / "fortran_c_comparison.html").write_text(env.from_string(_S4_REPORT_HTML).render(**ctx))
+    (output_dir / "fortran_c_comparison.md").write_text(env.from_string(_S4_REPORT_MD).render(**ctx))
 
 
 def _first_error_line(error: str) -> str:
@@ -360,6 +597,11 @@ def fix_c_code(
         "compile_commands": str(cc_path),
     }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
+
+    if status_fn:
+        status_fn("Generating Fortran vs C comparison report…")
+    log.info("Generating Fortran vs C comparison report")
+    _generate_fortran_c_report(output_dir, c_dir, baseline_dir, bench_results, llm_turns, total_retries)
     log.info("Stage complete")
     return result
 
