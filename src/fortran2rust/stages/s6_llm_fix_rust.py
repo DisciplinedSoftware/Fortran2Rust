@@ -50,7 +50,7 @@ def _apply_llm_response(response: str, output_dir: Path) -> None:
 
 def _cargo_build(cargo_toml: Path) -> tuple[bool, str]:
     result = subprocess.run(
-        ["cargo", "build", "--manifest-path", str(cargo_toml)],
+        ["cargo", "build", "--lib", "--manifest-path", str(cargo_toml)],
         capture_output=True,
         text=True,
         timeout=300,
