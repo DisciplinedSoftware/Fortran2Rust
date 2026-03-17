@@ -165,6 +165,26 @@ def _evaluate_stage_result(stage_num: int, stage_result: dict) -> tuple[bool, st
     return (len(notes) == 0), "; ".join(notes)
 
 
+def _blocking_stage_reason(stage_num: int, results: dict) -> str | None:
+    if stage_num == 5:
+        stage4 = results.get(4, {})
+        if stage4.get("error"):
+            return "Skipped because Stage 4 failed"
+        if stage4.get("compile_ok") is False:
+            return "Skipped because Stage 4 did not produce compilable C output"
+
+    if stage_num == 6 and results.get(5, {}).get("error"):
+        return "Skipped because Stage 5 failed"
+
+    if stage_num == 7 and results.get(6, {}).get("error"):
+        return "Skipped because Stage 6 failed"
+
+    if stage_num == 8 and results.get(7, {}).get("error"):
+        return "Skipped because Stage 7 failed"
+
+    return None
+
+
 def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) -> Path:
     """Run the full conversion pipeline. Returns the run directory."""
     console = Console()
@@ -233,6 +253,13 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
 
             status_fn = _make_status_fn(stage_num)
             status_fn("Starting…")
+
+            blocking_reason = _blocking_stage_reason(stage_num, results)
+            if blocking_reason:
+                results[stage_num] = {"error": blocking_reason}
+                stage_issues.append((stage_num, blocking_reason))
+                console.print(f"  [yellow]↷ Stage {stage_num} skipped: {blocking_reason}[/yellow]")
+                continue
 
             try:
                 if stage_num == 1:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fortran2rust.pipeline import _evaluate_stage_result
+from fortran2rust.pipeline import _blocking_stage_reason, _evaluate_stage_result
 
 
 def test_stage6_marks_numerical_failures_as_issue() -> None:
@@ -37,3 +37,31 @@ def test_stage6_accepts_passing_benchmarks() -> None:
 
     assert ok is True
     assert notes == ""
+
+
+def test_stage5_is_blocked_when_stage4_failed() -> None:
+    reason = _blocking_stage_reason(
+        5,
+        {
+            4: {
+                "error": "C compilation failed: LLM conversion did not return recognizable C code",
+                "compile_ok": False,
+            }
+        },
+    )
+
+    assert reason == "Skipped because Stage 4 failed"
+
+
+def test_stage5_is_blocked_when_stage4_has_no_compilable_c_output() -> None:
+    reason = _blocking_stage_reason(
+        5,
+        {
+            4: {
+                "compile_ok": False,
+                "bench_ok": False,
+            }
+        },
+    )
+
+    assert reason == "Skipped because Stage 4 did not produce compilable C output"

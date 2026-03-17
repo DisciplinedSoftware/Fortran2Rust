@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from jinja2 import BaseLoader, Environment
 
 from ..exceptions import BenchmarkRuntimeError, CompilationError
 from ._log import make_stage_logger
@@ -928,6 +931,7 @@ def _make_c_axpy_driver(fn_name: str, N: int, prec: _Precision) -> str:
 extern int {fn_ext}(integer *n, {ct} *da, {ct} *dx, integer *incx, {ct} *dy, integer *incy);
 
 static {ct} bench_X[BENCH_N];
+static {ct} bench_Y0[BENCH_N];
 static {ct} bench_Y[BENCH_N];
 
 static void read_bin(const char *path, {ct} *buf, size_t count) {{
@@ -942,7 +946,7 @@ static void read_bin(const char *path, {ct} *buf, size_t count) {{
 int main(void) {{
     {ct} params[2];
     read_bin("dataset_{fn_lo}_A.bin", bench_X, BENCH_N);
-    read_bin("dataset_{fn_lo}_B.bin", bench_Y, BENCH_N);
+    read_bin("dataset_{fn_lo}_B.bin", bench_Y0, BENCH_N);
     read_bin("dataset_{fn_lo}_params.bin", params, 2);
 
     {ct} alpha = params[0];
@@ -951,10 +955,14 @@ int main(void) {{
     struct timespec t1, t2;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     for (int iter = 0; iter < 10; iter++) {{
+        memcpy(bench_Y, bench_Y0, sizeof(bench_Y));
         {fn_ext}(&n, &alpha, bench_X, &incx, bench_Y, &incy);
     }}
     clock_gettime(CLOCK_MONOTONIC, &t2);
     double elapsed_ms = ((t2.tv_sec - t1.tv_sec) * 1e9 + (t2.tv_nsec - t1.tv_nsec)) / 1e6 / 10.0;
+
+    memcpy(bench_Y, bench_Y0, sizeof(bench_Y));
+    {fn_ext}(&n, &alpha, bench_X, &incx, bench_Y, &incy);
 
     FILE *out = fopen("bench_{fn_lo}_output.bin", "wb");
     if (!out) {{ perror("bench_{fn_lo}_output.bin"); exit(1); }}
@@ -1388,6 +1396,12 @@ def _make_c_generic_driver(fn_name: str, N: int,
                 call_args.append(f"&{cname}")
                 proto_args.append(f"integer *{cname}")
 
+            elif "LOGICAL" in ptype:
+                decls.append(f"    logical {cname};")
+                inits.append(f"    {cname} = 1;")
+                call_args.append(f"&{cname}")
+                proto_args.append(f"logical *{cname}")
+
             elif p_prec is not None:
                 pctype = p_prec.c_type
                 if p["is_array"]:
@@ -1413,9 +1427,10 @@ def _make_c_generic_driver(fn_name: str, N: int,
                     call_args.append(f"&{cname}")
                     proto_args.append(f"{pctype} *{cname}")
             else:
-                decls.append(f"    /* TODO: {ptype} {cname}; */")
+                decls.append(f"    integer {cname}; /* TODO: {ptype} */")
+                inits.append(f"    {cname} = 0;")
                 call_args.append(f"&{cname}")
-                proto_args.append(f"void *{cname}")
+                proto_args.append(f"integer *{cname}")
 
         # Append ftnlen=1 for each CHARACTER parameter
         ftnlen_args = ["1"] * len(char_params)
@@ -1526,6 +1541,142 @@ int main(void) {{
     return 0;
 }}
 """
+
+# ── Stage-2 report templates ───────────────────────────────────────────────────
+
+_S2_REPORT_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stage 2 — Fortran Benchmark Results</title>
+<style>
+:root {
+  --primary: #007AC3;
+  --navy: #1B3C6E;
+  --bg: #F4F7FB;
+  --success: #00A550;
+  --danger: #E31937;
+  --text: #1A1A1A;
+}
+body { font-family: Inter, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; }
+header { background: var(--navy); color: white; padding: 1.5rem 2rem; }
+header h1 { margin: 0 0 0.25rem 0; font-size: 1.75rem; }
+header p { margin: 0; opacity: 0.8; font-size: 0.9rem; }
+.card { background: white; border-radius: 8px; padding: 1.5rem; margin: 1rem 2rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.card h2 { margin-top: 0; color: var(--navy); border-bottom: 2px solid var(--primary); padding-bottom: 0.5rem; }
+table { width: 100%; border-collapse: collapse; }
+th { background: var(--navy); color: white; padding: 0.75rem; text-align: left; }
+td { padding: 0.6rem 0.75rem; border-bottom: 1px solid #e0e8f0; }
+tr:last-child td { border-bottom: none; }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
+.metric { text-align: center; padding: 1rem; background: var(--bg); border-radius: 6px; }
+.metric .value { font-size: 2rem; font-weight: bold; color: var(--primary); }
+.metric .label { font-size: 0.8rem; color: #666; margin-top: 0.25rem; }
+.status-pass { background: #e8f7ef; color: var(--success); padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; }
+.status-fail { background: #fde8eb; color: var(--danger); padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; }
+.na { color: #aaa; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 Stage 2 — Fortran Benchmark Results</h1>
+  <p>{{ timestamp }}</p>
+</header>
+
+<div class="card">
+  <h2>Summary</h2>
+  <div class="summary-grid">
+    <div class="metric"><div class="value">{{ summary.total }}</div><div class="label">Entry Points</div></div>
+    <div class="metric"><div class="value">{{ summary.compiled }}</div><div class="label">Compiled</div></div>
+    <div class="metric"><div class="value">{{ summary.ran }}</div><div class="label">Ran Successfully</div></div>
+    <div class="metric"><div class="value">{{ summary.precision_ok }}</div><div class="label">Precision Output Valid</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Entry-Point Results</h2>
+  <table>
+    <tr>
+      <th>Function</th>
+      <th>Calibrated N</th>
+      <th>Fortran Time (ms)</th>
+      <th>Compiled</th>
+      <th>Ran</th>
+      <th>Precision Output</th>
+    </tr>
+    {% for row in rows %}
+    <tr>
+      <td><strong>{{ row.function }}</strong></td>
+      <td>{{ row.n if row.n is not none else '<span class="na">—</span>' }}</td>
+      <td>{{ "%.3f" | format(row.time_ms) if row.time_ms is not none else '<span class="na">—</span>' }}</td>
+      <td>{% if row.compile_ok %}<span class="status-pass">YES</span>{% else %}<span class="status-fail">NO</span>{% endif %}</td>
+      <td>{% if row.run_ok %}<span class="status-pass">YES</span>{% else %}<span class="status-fail">NO</span>{% endif %}</td>
+      <td>{% if row.precision_ok %}<span class="status-pass">VALID</span>{% else %}<span class="status-fail">MISSING</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+</body>
+</html>"""
+
+_S2_REPORT_MD = """# Stage 2 — Fortran Benchmark Results
+
+**Generated:** {{ timestamp }}
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Entry Points | {{ summary.total }} |
+| Compiled | {{ summary.compiled }} |
+| Ran Successfully | {{ summary.ran }} |
+| Precision Output Valid | {{ summary.precision_ok }} |
+
+## Entry-Point Results
+
+| Function | Calibrated N | Fortran Time (ms) | Compiled | Ran | Precision Output |
+|----------|-------------|-------------------|----------|-----|-----------------|
+{% for row in rows %}| {{ row.function }} | {{ row.n if row.n is not none else "—" }} | {{ "%.3f" | format(row.time_ms) if row.time_ms is not none else "—" }} | {{ "YES" if row.compile_ok else "NO" }} | {{ "YES" if row.run_ok else "NO" }} | {{ "VALID" if row.precision_ok else "MISSING" }} |
+{% endfor %}
+"""
+
+
+def _generate_benchmark_report(
+    output_dir: Path,
+    benchmarks: dict,
+    ep_n: dict[str, int],
+    all_datasets: dict,
+    entry_points: list[str],
+) -> None:
+    """Write benchmark_results.{html,md} into output_dir."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = []
+    for ep in entry_points:
+        info = benchmarks.get(ep, {})
+        precision_ok = bool(all_datasets.get(ep + "_precision", {}).get("expected"))
+        rows.append({
+            "function": ep.lower(),
+            "n": ep_n.get(ep),
+            "time_ms": info.get("time_ms"),
+            "compile_ok": bool(info.get("compile_ok")),
+            "run_ok": bool(info.get("run_ok")),
+            "precision_ok": precision_ok,
+        })
+
+    summary = {
+        "total": len(rows),
+        "compiled": sum(1 for r in rows if r["compile_ok"]),
+        "ran": sum(1 for r in rows if r["run_ok"]),
+        "precision_ok": sum(1 for r in rows if r["precision_ok"]),
+    }
+
+    ctx = {"timestamp": timestamp, "summary": summary, "rows": rows}
+    env = Environment(loader=BaseLoader())
+    (output_dir / "benchmark_results.html").write_text(env.from_string(_S2_REPORT_HTML).render(**ctx))
+    (output_dir / "benchmark_results.md").write_text(env.from_string(_S2_REPORT_MD).render(**ctx))
 
 
 def generate_benchmarks(
@@ -1718,6 +1869,7 @@ def generate_benchmarks(
         bench_info: dict = {
             "driver_file": str(driver_file),
             "n": N,
+            "numpy_dtype": prec.numpy_dtype,
             "dataset": {k: str(v) for k, v in dataset_paths.items()},
             "compile_cmd": compile_cmd,
             "compile_ok": False,
@@ -1784,6 +1936,10 @@ def generate_benchmarks(
                 if bin_file.exists():
                     bench_info["output_file"] = str(bin_file)
                     bench_info["output_ok"] = True
+                    expected_file = output_dir / f"dataset_{ep_lower}_expected.bin"
+                    shutil.copy2(bin_file, expected_file)
+                    bench_info["dataset"]["expected"] = str(expected_file)
+                    all_datasets[ep]["expected"] = str(expected_file)
                 else:
                     raise BenchmarkRuntimeError(
                         ep,
@@ -1856,6 +2012,11 @@ def generate_benchmarks(
                             f"=== RUN EXIT CODE: {prec_run.returncode} ===\n"
                         )
                     log.info(f"  Fortran precision run exit {prec_run.returncode}")
+                    prec_bin_file = output_dir / f"bench_{ep_lower}_precision_output.bin"
+                    if prec_run.returncode == 0 and prec_bin_file.exists():
+                        prec_expected_file = output_dir / f"dataset_{ep_lower}_precision_expected.bin"
+                        shutil.copy2(prec_bin_file, prec_expected_file)
+                        all_datasets[ep + "_precision"]["expected"] = str(prec_expected_file)
                 else:
                     log.warning(f"  gfortran precision FAILED for {ep}: {prec_result.stderr[:300]}")
             except Exception as e:
@@ -1870,6 +2031,18 @@ def generate_benchmarks(
         "datasets": all_datasets,
     }
     (output_dir / "benchmarks.json").write_text(json.dumps(result_data, indent=2, default=str))
+
+    # ── Phase 4: stage-2 report ───────────────────────────────────────────────
+    if status_fn:
+        status_fn("Generating Stage 2 benchmark report…")
+    _generate_benchmark_report(
+        output_dir=output_dir,
+        benchmarks=benchmarks,
+        ep_n=ep_n,
+        all_datasets=all_datasets,
+        entry_points=entry_points,
+    )
+
     log.info("Stage complete")
     return result_data
 

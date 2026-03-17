@@ -75,7 +75,7 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
     # c2rust requires absolute paths — relative paths cause a canonicalize panic
     compile_commands = compile_commands.resolve()
     output_dir_abs = output_dir.resolve()
-    c_input_files = [f for f in _load_compile_command_c_files(compile_commands) if not f.name.startswith("bench_")]
+    c_input_files = _load_compile_command_c_files(compile_commands)
     expected_modules = sorted({f.stem for f in c_input_files})
     log.info(f"transpile_to_rust: compile_commands={compile_commands}, output_dir={output_dir_abs}")
 
@@ -116,16 +116,16 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         raise ConversionError("c2rust", first_error)
 
     src_dir = output_dir / "src"
-    lib_modules = [
+    src_modules = [
         f for f in rust_files
-        if f.parent == src_dir and f.name != "lib.rs" and not f.name.startswith("bench_")
+        if f.parent == src_dir and f.name != "lib.rs"
     ]
-    generated_modules = sorted({f.stem for f in lib_modules})
+    generated_modules = sorted({f.stem for f in src_modules})
     missing_modules = sorted(set(expected_modules) - set(generated_modules))
-    if not lib_modules:
+    if not src_modules:
         raise ConversionError(
             "c2rust",
-            "No library Rust modules were generated (only benchmark/transient files).",
+            "No Rust modules were generated under src/.",
         )
     if missing_modules:
         log.warning(
@@ -134,7 +134,7 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         )
 
     if status_fn:
-        status_fn(f"Generated {len(rust_files)} Rust files")
+        status_fn(f"Generated {len(rust_files)} Rust files from {len(c_input_files)} C inputs")
 
     # Generate Cargo.toml
     cargo_toml_path = output_dir / "Cargo.toml"

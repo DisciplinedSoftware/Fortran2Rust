@@ -57,6 +57,7 @@ tr:last-child td { border-bottom: none; }
 .status-pass { background: #e8f7ef; color: var(--success); padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; }
 .status-fail { background: #fde8eb; color: var(--danger); padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; }
 .na { color: #aaa; }
+.threshold-note { color: #666; font-size: 0.85rem; margin: -0.25rem 0 0.75rem; }
 </style>
 </head>
 <body>
@@ -71,14 +72,15 @@ tr:last-child td { border-bottom: none; }
     <div class="metric"><div class="value">{{ summary.functions_benchmarked }}</div><div class="label">Functions Benchmarked</div></div>
     <div class="metric"><div class="value">{{ summary.functions_passed }}</div><div class="label">Numerical Checks Passed</div></div>
     <div class="metric"><div class="value">{{ summary.llm_repairs }}</div><div class="label">LLM Repairs</div></div>
-    <div class="metric"><div class="value">{{ summary.fortran_loc }}</div><div class="label">Fortran LOC</div></div>
-    <div class="metric"><div class="value">{{ summary.c_loc }}</div><div class="label">C LOC</div></div>
+    {% if uniform_atol is not none %}<div class="metric"><div class="value">{{ "%.0e" | format(uniform_atol) }}</div><div class="label">Accuracy Threshold (atol)</div></div>{% endif %}
   </div>
 </div>
 
 {% if bench_rows %}
 <div class="card">
   <h2>Numerical Accuracy &amp; Performance</h2>
+  {% if uniform_atol is not none %}<p class="threshold-note">Pass threshold: atol = rtol = {{ "%.2e" | format(uniform_atol) }}</p>
+  {% else %}<p class="threshold-note">Pass threshold varies by function precision — see Atol column.</p>{% endif %}
   <table>
     <tr>
       <th>Function</th>
@@ -86,9 +88,12 @@ tr:last-child td { border-bottom: none; }
       <th>C (ms)</th>
       <th>C / Fortran</th>
       <th>Max |Δ|</th>
+      <th>% of atol</th>
+      <th>Atol</th>
       <th>Status</th>
     </tr>
     {% for row in bench_rows %}
+    {% set diff_pct = (row.max_abs_diff / row.atol * 100) if (row.max_abs_diff is not none) else none %}
     <tr>
       <td><strong>{{ row.function }}</strong></td>
       <td>{{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else '<span class="na">N/A</span>' }}</td>
@@ -100,30 +105,22 @@ tr:last-child td { border-bottom: none; }
           {% else %}<span class="fail">{{ "%.2fx" | format(row.ratio) }}</span>{% endif %}
         {% else %}<span class="na">N/A</span>{% endif %}
       </td>
-      <td>{{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else '<span class="na">N/A</span>' }}</td>
+      <td>
+        {% if row.max_abs_diff is not none %}
+          {% if diff_pct < 1 %}<span class="pass">{{ "%.2e" | format(row.max_abs_diff) }}</span>
+          {% elif diff_pct < 50 %}<span style="color:var(--amber);font-weight:bold">{{ "%.2e" | format(row.max_abs_diff) }}</span>
+          {% else %}<span class="fail">{{ "%.2e" | format(row.max_abs_diff) }}</span>{% endif %}
+        {% else %}<span class="na">N/A</span>{% endif %}
+      </td>
+      <td>
+        {% if diff_pct is not none %}
+          {% if diff_pct < 1 %}<span class="pass">{{ "%.2f" | format(diff_pct) }}%</span>
+          {% elif diff_pct < 50 %}<span style="color:var(--amber);font-weight:bold">{{ "%.2f" | format(diff_pct) }}%</span>
+          {% else %}<span class="fail">{{ "%.1f" | format(diff_pct) }}%</span>{% endif %}
+        {% else %}<span class="na">N/A</span>{% endif %}
+      </td>
+      <td><span class="na" style="font-size:0.85em">{{ "%.0e" | format(row.atol) }}</span></td>
       <td>{% if row.pass %}<span class="status-pass">PASS</span>{% else %}<span class="status-fail">FAIL</span>{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
-{% endif %}
-
-{% if loc_rows %}
-<div class="card">
-  <h2>Code Size: Fortran vs C</h2>
-  <table>
-    <tr>
-      <th>Module</th>
-      <th>Fortran LOC</th>
-      <th>C LOC</th>
-      <th>Expansion</th>
-    </tr>
-    {% for row in loc_rows %}
-    <tr>
-      <td>{{ row.name }}</td>
-      <td>{{ row.fortran_loc if row.fortran_loc is not none else '<span class="na">—</span>' }}</td>
-      <td>{{ row.c_loc if row.c_loc is not none else '<span class="na">—</span>' }}</td>
-      <td>{% if row.ratio is not none %}{{ "%.1fx" | format(row.ratio) }}{% else %}<span class="na">—</span>{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
@@ -144,23 +141,17 @@ _S4_REPORT_MD = """# Stage 4 — Fortran vs C Comparison
 | Functions Benchmarked | {{ summary.functions_benchmarked }} |
 | Numerical Checks Passed | {{ summary.functions_passed }} |
 | LLM Repairs | {{ summary.llm_repairs }} |
-| Fortran LOC (total) | {{ summary.fortran_loc }} |
-| C LOC (total) | {{ summary.c_loc }} |
 
 {% if bench_rows %}
 ## Numerical Accuracy & Performance
 
-| Function | Fortran (ms) | C (ms) | C / Fortran | Max \\|Δ\\| | Status |
-|----------|-------------|--------|------------|--------|--------|
-{% for row in bench_rows %}| {{ row.function }} | {{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.1f" | format(row.c_ms) if row.c_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.ratio) if row.ratio is not none else "N/A" }} | {{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }} | {{ "PASS" if row.pass else "FAIL" }} |
-{% endfor %}
+{% if uniform_atol is not none %}> Pass threshold: atol = rtol = {{ "%.2e" | format(uniform_atol) }}
+{% else %}> Pass threshold varies by function precision — see Atol column.
 {% endif %}
-{% if loc_rows %}
-## Code Size: Fortran vs C
 
-| Module | Fortran LOC | C LOC | Expansion |
-|--------|------------|-------|-----------|
-{% for row in loc_rows %}| {{ row.name }} | {{ row.fortran_loc if row.fortran_loc is not none else "—" }} | {{ row.c_loc if row.c_loc is not none else "—" }} | {{ "%.1fx" | format(row.ratio) if row.ratio is not none else "—" }} |
+| Function | Fortran (ms) | C (ms) | C / Fortran | Max \\|Δ\\| | % of atol | Atol | Status |
+|----------|-------------|--------|------------|-----------|-----------|------|--------|
+{% for row in bench_rows %}| {{ row.function }} | {{ "%.1f" | format(row.fortran_ms) if row.fortran_ms is not none else "N/A" }} | {{ "%.1f" | format(row.c_ms) if row.c_ms is not none else "N/A" }} | {{ "%.2fx" | format(row.ratio) if row.ratio is not none else "N/A" }} | {{ "%.2e" | format(row.max_abs_diff) if row.max_abs_diff is not none else "N/A" }} | {{ "%.2f%%" | format(row.max_abs_diff / row.atol * 100) if row.max_abs_diff is not none else "N/A" }} | {{ "%.0e" | format(row.atol) }} | {{ "PASS" if row.pass else "FAIL" }} |
 {% endfor %}
 {% endif %}
 """
@@ -185,6 +176,29 @@ def _count_loc(path: Path) -> int:
     return lines
 
 
+def _normalize_symbol_name(name: str) -> str:
+    return name.strip().lower()
+
+
+# Strip trailing "_precision" suffix so both "dasum" and "dasum_precision" map
+# to the same canonical name when looking up the Stage 2 dtype.
+def _normalize_bench_name(name: str) -> str:
+    return re.sub(r"_precision$", "", name.strip().lower())
+
+
+# Numerical tolerances keyed by numpy dtype string.
+# These intentionally exceed machine epsilon by a few orders of magnitude to
+# allow for platform-specific FP evaluation order differences, while still
+# catching real numerical divergence between the Fortran and C outputs.
+_ATOL_BY_DTYPE: dict[str, float] = {
+    "float64":   1e-10,
+    "float32":   1e-5,
+    "complex128": 1e-10,
+    "complex64":  1e-5,
+}
+_DEFAULT_ATOL: float = 1e-10
+
+
 def _generate_fortran_c_report(
     output_dir: Path,
     fortran_dir: Path,
@@ -192,29 +206,43 @@ def _generate_fortran_c_report(
     bench_results: dict,
     llm_turns: int,
     total_retries: int,
+    entry_points: list[str] | None = None,
 ) -> None:
     """Write fortran_c_comparison.{html,md} into output_dir."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    normalized_entry_points = [_normalize_symbol_name(ep) for ep in (entry_points or [])]
+    entry_point_set = set(normalized_entry_points)
 
-    # Fortran baseline timing from s2 benchmarks.json
+    # Fortran baseline timing and dtype from s2 benchmarks.json
     fortran_times: dict[str, float | None] = {}
+    fortran_dtypes: dict[str, str] = {}
     bench_json = baseline_dir / "benchmarks.json"
     if bench_json.exists():
         try:
             data = json.loads(bench_json.read_text()).get("benchmarks", {})
             for fn, info in data.items():
-                fortran_times[fn] = info.get("time_ms")
+                key = _normalize_symbol_name(fn)
+                fortran_times[key] = info.get("time_ms")
+                if "numpy_dtype" in info:
+                    fortran_dtypes[key] = info["numpy_dtype"]
         except Exception:
             pass
 
     # Benchmark comparison rows
     bench_rows = []
-    for fn, br in bench_results.items():
+    bench_results_by_name = {_normalize_symbol_name(fn): br for fn, br in bench_results.items()}
+    bench_row_names = normalized_entry_points if normalized_entry_points else sorted(bench_results_by_name)
+    for fn in bench_row_names:
+        br = bench_results_by_name.get(fn)
+        if br is None:
+            continue
         fortran_ms = fortran_times.get(fn)
         c_ms = br.get("c_time_ms")
         max_abs_diff = br.get("max_abs_diff")
         passed = bool(br.get("pass"))
-        ratio = (c_ms / fortran_ms) if (c_ms is not None and fortran_ms) else None
+        ratio = (c_ms / fortran_ms) if (c_ms is not None and fortran_ms is not None and fortran_ms != 0) else None
+        row_dtype = br.get("numpy_dtype") or fortran_dtypes.get(fn, "float64")
+        row_atol = _ATOL_BY_DTYPE.get(row_dtype, _DEFAULT_ATOL)
         bench_rows.append({
             "function": fn,
             "fortran_ms": fortran_ms,
@@ -222,35 +250,23 @@ def _generate_fortran_c_report(
             "ratio": ratio,
             "max_abs_diff": max_abs_diff,
             "pass": passed,
+            "atol": row_atol,
         })
 
-    # LOC comparison: match .f files in fortran_dir with .c files in output_dir (exclude bench_*)
-    loc_rows = []
-    f_files = {f.stem: f for f in sorted(fortran_dir.glob("*.f"))}
-    c_files = {f.stem: f for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")}
-    all_stems = sorted(set(f_files) | set(c_files))
-    for stem in all_stems:
-        f_loc = _count_loc(f_files[stem]) if stem in f_files else None
-        c_loc = _count_loc(c_files[stem]) if stem in c_files else None
-        ratio = (c_loc / f_loc) if (c_loc is not None and f_loc) else None
-        loc_rows.append({"name": stem, "fortran_loc": f_loc, "c_loc": c_loc, "ratio": ratio})
-
-    total_f_loc = sum(r["fortran_loc"] for r in loc_rows if r["fortran_loc"] is not None)
-    total_c_loc = sum(r["c_loc"] for r in loc_rows if r["c_loc"] is not None)
+    atol_values = {row["atol"] for row in bench_rows}
+    uniform_atol = next(iter(atol_values)) if len(atol_values) == 1 else None
 
     summary = {
         "functions_benchmarked": len(bench_rows),
         "functions_passed": sum(1 for r in bench_rows if r["pass"]),
         "llm_repairs": total_retries,
-        "fortran_loc": total_f_loc,
-        "c_loc": total_c_loc,
     }
 
     ctx = {
         "timestamp": timestamp,
         "summary": summary,
         "bench_rows": bench_rows,
-        "loc_rows": loc_rows,
+        "uniform_atol": uniform_atol,
     }
 
     env = Environment(loader=BaseLoader())
@@ -519,17 +535,15 @@ def _compile_and_run_bench(
 
 
 def _write_compile_commands(output_dir: Path) -> Path:
-    """Write compile_commands.json for non-benchmark C sources and return its path."""
-    lib_c_files = [
-        f.resolve() for f in sorted(output_dir.glob("*.c")) if not f.name.startswith("bench_")
-    ]
+    """Write compile_commands.json for all C sources (library + benchmark)."""
+    c_files = [f.resolve() for f in sorted(output_dir.glob("*.c"))]
     compile_commands = [
         {
             "file": str(f),
             "directory": str(output_dir.resolve()),
             "command": f"gcc -O2 -I{output_dir.resolve()} -c {f}",
         }
-        for f in lib_c_files
+        for f in c_files
     ]
     cc_path = output_dir / "compile_commands.json"
     cc_path.write_text(json.dumps(compile_commands, indent=2))
@@ -868,6 +882,7 @@ def _repair_file(
     error: str,
     attempt: int = 0,
     fortran_source: str | None = None,
+    cache_scope: str | None = None,
 ) -> bool:
     """Ask LLM to fix one specific file and write it back.
 
@@ -880,6 +895,8 @@ def _repair_file(
     context = (
         "Fix this C file produced by the f2c Fortran-to-C transpiler. "
         "Leading documentation comments were removed before sending to reduce token usage. "
+        "This C code must remain compatible with Stage 5 c2rust transpilation (clang C99), "
+        "so include required standard headers and avoid implicit declarations. "
         "Return ONLY the complete corrected C file contents, no explanation."
     )
     if fortran_source:
@@ -893,6 +910,7 @@ def _repair_file(
         error=error,
         code=compact_code,
         attempt=attempt,
+        cache_scope=cache_scope,
     )
     content = _extract_c_from_llm_response(response)
     if not _looks_like_c_code(content):
@@ -913,6 +931,7 @@ def _generate_c_from_fortran(
     f_file: Path,
     output_dir: Path,
     fortran_source: str | None = None,
+    cache_scope: str | None = None,
 ) -> Path:
     """Ask the LLM to convert a Fortran file that f2c could not handle into f2c-compatible C."""
     c_path = output_dir / f_file.with_suffix(".c").name
@@ -920,14 +939,17 @@ def _generate_c_from_fortran(
         context=(
             "Convert this Fortran source file to C using the f2c calling convention. "
             "Rules:\n"
-            "- Include \"f2c.h\" at the top\n"
+            "- Generate strict C99-compatible code that can be transpiled by c2rust/clang\n"
+            "- Include required standard headers first (for example <stdio.h>, <stdlib.h>, <string.h> as needed), then include \"f2c.h\"\n"
             "- All function names must have a trailing underscore (e.g. xerbla_)\n"
             "- Character arguments must be followed by an extra ftnlen length argument at the end\n"
             "- Use the types from f2c.h: integer, doublereal, real, ftnlen, etc.\n"
+            "- No implicit function declarations; ensure every external function is declared\n"
             "Return ONLY the complete C file, no explanation, no markdown fences."
         ),
         error="f2c could not convert this file (likely uses Fortran 90+ features like LEN_TRIM).",
         code=fortran_source if fortran_source is not None else f_file.read_text(),
+        cache_scope=cache_scope,
     )
     content = _extract_c_from_llm_response(response)
     if not _looks_like_c_code(content):
@@ -937,6 +959,16 @@ def _generate_c_from_fortran(
     content = _normalize_f2c_include_order(content)
     c_path.write_text(content.strip() + "\n")
     return c_path
+
+
+def _describe_stage4_error(exc: Exception) -> str:
+    if isinstance(exc, MaxRetriesExceededError):
+        wrapped = exc.wrapped
+        wrapped_detail = _describe_stage4_error(wrapped)
+        return f"{wrapped_detail} (max retries exceeded)" if wrapped_detail else str(exc)
+    if isinstance(exc, (CompilationError, BenchmarkRuntimeError)) and getattr(exc, "snippet", ""):
+        return f"{exc}: {exc.snippet}"
+    return str(exc)
 
 
 def fix_c_code(
@@ -964,221 +996,179 @@ def fix_c_code(
     llm_turns = 0
     total_retries = 0
     gcc_compile_log = output_dir / "gcc_compile.log"
-
-    # ── Pre-step: LLM-convert any .f files that f2c could not handle ─────────
-    required_syms = _required_symbols(entry_points, call_graph)
-    f_candidates = [
-        f_file for f_file in sorted(c_dir.glob("*.f"))
-        if not (output_dir / f_file.with_suffix(".c").name).exists()
-    ]
-    skipped_irrelevant_units: list[Path] = []
-    f_files_to_convert: list[Path] = []
-    for f_file in f_candidates:
-        defined = _fortran_defined_units(f_file)
-        if required_syms and defined and required_syms.isdisjoint(defined):
-            skipped_irrelevant_units.append(f_file)
-            continue
-        f_files_to_convert.append(f_file)
-
-    if skipped_irrelevant_units:
-        log.info(
-            "Skipping LLM conversion for .f file(s) that define no required symbols: "
-            + ", ".join(p.name for p in skipped_irrelevant_units)
-        )
-    if f_files_to_convert:
-        if status_fn:
-            status_fn(f"LLM: converting {len(f_files_to_convert)} Fortran file(s) to C (parallel)…")
-
-        def _convert_one(f_file: Path) -> None:
-            log.info(f"LLM converting {f_file.name} to C (f2c could not handle it)")
-            dest_f = output_dir / f_file.name
-            shutil.copy(f_file, dest_f)
-            selected_source = _extract_required_fortran_units(dest_f, required_syms)
-            _generate_c_from_fortran(llm, dest_f, output_dir, fortran_source=selected_source)
-
-        with ThreadPoolExecutor(max_workers=len(f_files_to_convert)) as executor:
-            list(executor.map(_convert_one, f_files_to_convert))
-
-        llm_turns += len(f_files_to_convert)
-
-    # ── Compile loop: fix one failing file at a time ──────────────────────────
-    if status_fn:
-        status_fn("Compiling C code…")
-    compile_ok, compile_output = _compile_c(output_dir)
-    compile_error = compile_output  # full output kept for result.json
-    with open(gcc_compile_log, "a") as fh:
-        fh.write(f"=== INITIAL COMPILE ===\n{compile_output}\n=== EXIT: {'OK' if compile_ok else 'FAIL'} ===\n\n")
-    log.info(f"Initial C compile: {'OK' if compile_ok else 'FAILED'}")
-    if not compile_ok:
-        log.warning(compile_output)
-
-    attempt = 0
-    no_progress_rounds = 0
-    while not compile_ok and attempt < max_retries:
-        failing_files = _get_failing_files(compile_output, output_dir)
-        _console.print(
-            f"  [yellow]⚠ C compilation failed[/yellow] in "
-            f"[bold]{', '.join(f.name for f in failing_files)}[/bold]: "
-            f"[dim]{_first_error_line(compile_output)}[/dim]"
-        )
-
-        # Fix all currently-failing files in parallel, then recompile once.
-        def _fix_one(target: Path) -> bool:
-            llm_log.append({
-                "phase": "compile", "attempt": attempt,
-                "target_file": target.name,
-                "error": compile_output,
-            })
-            if status_fn:
-                status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
-            log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
-
-            fortran_src = _find_fortran_source_for_function(c_dir, target.stem)
-
-            return _repair_file(
-                llm,
-                target,
-                filter_errors_for_file(compile_output, target.name),
-                attempt=attempt,
-                fortran_source=fortran_src,
-            )
-
-        with ThreadPoolExecutor(max_workers=len(failing_files)) as executor:
-            changed_flags = list(executor.map(_fix_one, failing_files))
-
-        if not any(changed_flags):
-            no_progress_rounds += 1
-            log.warning(
-                "No effective source changes after LLM repair round %d for file(s): %s",
-                attempt + 1,
-                ", ".join(f.name for f in failing_files),
-            )
-        else:
-            no_progress_rounds = 0
-
-        llm_turns += len(failing_files)
-        total_retries += len(failing_files)
-        compile_ok, compile_output = _compile_c(output_dir)
-        compile_error = compile_output
-        with open(gcc_compile_log, "a") as fh:
-            fh.write(
-                f"=== ATTEMPT {attempt+1} (after LLM fix of "
-                f"{[f.name for f in failing_files]}) ===\n"
-                f"{compile_output}\n=== EXIT: {'OK' if compile_ok else 'FAIL'} ===\n\n"
-            )
-        if compile_ok:
-            log.info(f"C compile OK after attempt {attempt+1}")
-        else:
-            log.warning(f"C compile still failing after attempt {attempt+1}")
-
-        # Cost guard: stop early when repeated LLM rounds produce no effective edits.
-        if not compile_ok and no_progress_rounds >= 2:
-            compile_error = (
-                compile_output
-                + "\n\nStage 4 aborted early: LLM repairs made no effective source changes "
-                + "for two consecutive rounds."
-            )
-            break
-        attempt += 1
-
-    if not compile_ok:
-        exc = CompilationError("C", compile_error)
-        raise MaxRetriesExceededError("Stage 4 (fix C)", exc)
-
-    if status_fn:
-        status_fn("C compilation successful")
-    log.info("C compilation successful")
-
-    # Write compile_commands.json as soon as C compiles, so Stage 5 can proceed
-    # even if benchmark validation later fails.
-    cc_path = _write_compile_commands(output_dir)
-    log.info("Wrote compile_commands.json")
-
-    # ── Benchmark loop ────────────────────────────────────────────────────────
+    cache_scope = f"stage4:{output_dir.resolve()}"
+    compile_ok = False
+    compile_error = ""
     bench_ok = False
     bench_results: dict = {}
-    if compile_ok:
-        bench_c_files = sorted(f for f in output_dir.glob("bench_*.c") if not f.stem.endswith("_precision"))
-        if not bench_c_files:
-            bench_ok = True  # nothing to benchmark
-        else:
-            all_passed = True
-            for bench_c in bench_c_files:
-                fn_name = re.sub(r"^bench_", "", bench_c.stem)
-                fortran_bin = baseline_dir / f"bench_{fn_name}_output.bin"
-                if not fortran_bin.exists():
-                    continue  # no baseline to compare against
+    cc_path: Path | None = None
+    stage_error: str | None = None
+    result: dict | None = None
 
-                if status_fn:
-                    status_fn(f"Running C benchmark: {bench_c.stem}…")
-                log.info(f"Running C benchmark: {bench_c.stem}")
-                ok, err, c_bin, c_time_ms = _compile_and_run_bench(
+    try:
+        # ── Pre-step: LLM-convert any .f files that f2c could not handle ─────────
+        required_syms = _required_symbols(entry_points, call_graph)
+        f_candidates = [
+            f_file for f_file in sorted(c_dir.glob("*.f"))
+            if not (output_dir / f_file.with_suffix(".c").name).exists()
+        ]
+        skipped_irrelevant_units: list[Path] = []
+        f_files_to_convert: list[Path] = []
+        for f_file in f_candidates:
+            defined = _fortran_defined_units(f_file)
+            if required_syms and defined and required_syms.isdisjoint(defined):
+                skipped_irrelevant_units.append(f_file)
+                continue
+            f_files_to_convert.append(f_file)
+
+        if skipped_irrelevant_units:
+            log.info(
+                "Skipping LLM conversion for .f file(s) that define no required symbols: "
+                + ", ".join(p.name for p in skipped_irrelevant_units)
+            )
+        if f_files_to_convert:
+            if status_fn:
+                status_fn(f"LLM: converting {len(f_files_to_convert)} Fortran file(s) to C (parallel)…")
+
+            llm_turns += len(f_files_to_convert)
+
+            def _convert_one(f_file: Path) -> None:
+                log.info(f"LLM converting {f_file.name} to C (f2c could not handle it)")
+                llm_log.append({"phase": "preconvert", "target_file": f_file.name})
+                dest_f = output_dir / f_file.name
+                shutil.copy(f_file, dest_f)
+                selected_source = _extract_required_fortran_units(dest_f, required_syms)
+                _generate_c_from_fortran(
+                    llm,
+                    dest_f,
                     output_dir,
-                    bench_c,
-                    output_dir,
-                    baseline_dir,
-                    call_graph=call_graph,
+                    fortran_source=selected_source,
+                    cache_scope=cache_scope,
                 )
-                skip_fn_llm_repairs = False
-                bench_succeeded = False
-                for b_attempt in range(max_retries):
-                    if ok and c_bin and c_bin.exists():
-                        c_data = np.fromfile(str(c_bin), dtype=np.float64)
-                        f_data = np.fromfile(str(fortran_bin), dtype=np.float64)
-                        if status_fn:
-                            status_fn(f"Comparing {fn_name} output vs Fortran baseline…")
-                        if c_data.shape == f_data.shape and np.allclose(c_data, f_data, atol=1e-10, rtol=1e-10):
-                            bench_results[fn_name] = {"pass": True, "max_abs_diff": 0.0, "c_time_ms": c_time_ms}
-                            log.info(f"  {fn_name}: numerical check PASSED, c_time_ms={c_time_ms}")
-                            bench_succeeded = True
-                            break
-                        max_abs = float(np.max(np.abs(c_data - f_data))) if c_data.shape == f_data.shape else float("inf")
-                        bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs, "c_time_ms": c_time_ms}
-                        _console.print(
-                            f"  [yellow]⚠ Numerical precision failed[/yellow] for [bold]{fn_name}[/bold]: "
-                            f"max diff = [bold]{max_abs:.3e}[/bold]"
-                        )
-                        log.warning(f"  {fn_name}: numerical check FAILED, max_abs_diff={max_abs:.3e}")
-                        err = f"Numerical mismatch: max_abs_diff={max_abs:.6e}"
-                    else:
-                        if not ok:
-                            if _is_non_repairable_bench_error(err):
-                                bench_results[fn_name] = {
-                                    "pass": False,
-                                    "max_abs_diff": None,
-                                    "c_time_ms": None,
-                                    "reason": "non-repairable link/dependency error",
-                                }
-                                all_passed = False
-                                skip_fn_llm_repairs = True
-                                log.warning(
-                                    "  %s: skipping LLM retries due to non-repairable benchmark error",
-                                    fn_name,
-                                )
-                                break
-                            _console.print(
-                                f"  [yellow]⚠ C benchmark failed to run[/yellow] for [bold]{fn_name}[/bold]: "
-                                f"[dim]{_first_error_line(err)}[/dim]"
-                            )
-                            log.warning(f"  {fn_name}: benchmark run failed: {err}")
-                    llm_log.append({
-                        "phase": "bench", "fn": fn_name, "attempt": b_attempt, "error": err,
-                    })
-                    if status_fn:
-                        status_fn(f"LLM: fixing numerical precision in {bench_c.name} (attempt {b_attempt+1}/{max_retries})…")
-                    log.info(f"LLM bench repair attempt {b_attempt+1}/{max_retries} for {bench_c.name}")
 
-                    # Try to find the original Fortran source for context
-                    fortran_src = _find_fortran_source_for_function(c_dir, fn_name)
-                    _repair_file(
-                        llm,
-                        bench_c,
-                        filter_errors_for_file(err, bench_c.name),
-                        attempt=b_attempt,
-                        fortran_source=fortran_src,
-                    )
-                    llm_turns += 1
-                    total_retries += 1
+            with ThreadPoolExecutor(max_workers=len(f_files_to_convert)) as executor:
+                list(executor.map(_convert_one, f_files_to_convert))
+
+        # ── Compile loop: fix one failing file at a time ──────────────────────────
+        if status_fn:
+            status_fn("Compiling C code…")
+        compile_ok, compile_output = _compile_c(output_dir)
+        compile_error = compile_output  # full output kept for result.json
+        with open(gcc_compile_log, "a") as fh:
+            fh.write(f"=== INITIAL COMPILE ===\n{compile_output}\n=== EXIT: {'OK' if compile_ok else 'FAIL'} ===\n\n")
+        log.info(f"Initial C compile: {'OK' if compile_ok else 'FAILED'}")
+        if not compile_ok:
+            log.warning(compile_output)
+
+        attempt = 0
+        no_progress_rounds = 0
+        while not compile_ok and attempt < max_retries:
+            failing_files = _get_failing_files(compile_output, output_dir)
+            _console.print(
+                f"  [yellow]⚠ C compilation failed[/yellow] in "
+                f"[bold]{', '.join(f.name for f in failing_files)}[/bold]: "
+                f"[dim]{_first_error_line(compile_output)}[/dim]"
+            )
+
+            # Fix all currently-failing files in parallel, then recompile once.
+            def _fix_one(target: Path) -> bool:
+                llm_log.append({
+                    "phase": "compile", "attempt": attempt,
+                    "target_file": target.name,
+                    "error": compile_output,
+                })
+                if status_fn:
+                    status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
+                log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
+
+                fortran_src = _find_fortran_source_for_function(c_dir, target.stem)
+
+                return _repair_file(
+                    llm,
+                    target,
+                    filter_errors_for_file(compile_output, target.name),
+                    attempt=attempt,
+                    fortran_source=fortran_src,
+                    cache_scope=cache_scope,
+                )
+
+            with ThreadPoolExecutor(max_workers=len(failing_files)) as executor:
+                changed_flags = list(executor.map(_fix_one, failing_files))
+
+            if not any(changed_flags):
+                no_progress_rounds += 1
+                log.warning(
+                    "No effective source changes after LLM repair round %d for file(s): %s",
+                    attempt + 1,
+                    ", ".join(f.name for f in failing_files),
+                )
+            else:
+                no_progress_rounds = 0
+
+            llm_turns += len(failing_files)
+            total_retries += len(failing_files)
+            compile_ok, compile_output = _compile_c(output_dir)
+            compile_error = compile_output
+            with open(gcc_compile_log, "a") as fh:
+                fh.write(
+                    f"=== ATTEMPT {attempt+1} (after LLM fix of "
+                    f"{[f.name for f in failing_files]}) ===\n"
+                    f"{compile_output}\n=== EXIT: {'OK' if compile_ok else 'FAIL'} ===\n\n"
+                )
+            if compile_ok:
+                log.info(f"C compile OK after attempt {attempt+1}")
+            else:
+                log.warning(f"C compile still failing after attempt {attempt+1}")
+
+            # Cost guard: stop early when repeated LLM rounds produce no effective edits.
+            if not compile_ok and no_progress_rounds >= 2:
+                compile_error = (
+                    compile_output
+                    + "\n\nStage 4 aborted early: LLM repairs made no effective source changes "
+                    + "for two consecutive rounds."
+                )
+                break
+            attempt += 1
+
+        if not compile_ok:
+            stage_error = _describe_stage4_error(CompilationError("C", compile_error))
+        else:
+            if status_fn:
+                status_fn("C compilation successful")
+            log.info("C compilation successful")
+
+            # Write compile_commands.json as soon as C compiles, so Stage 5 can proceed
+            # even if benchmark validation later fails.
+            cc_path = _write_compile_commands(output_dir)
+            log.info("Wrote compile_commands.json")
+
+            # ── Benchmark loop ────────────────────────────────────────────────────────
+            # Load baseline dtype info (written by Stage 2) so each function's
+            # numpy dtype and matching tolerance can be used for comparison.
+            _s2_dtypes: dict[str, str] = {}
+            _bench_json = baseline_dir / "benchmarks.json"
+            if _bench_json.exists():
+                try:
+                    _bj = json.loads(_bench_json.read_text()).get("benchmarks", {})
+                    for _ep, _bi in _bj.items():
+                        _s2_dtypes[_normalize_bench_name(_ep)] = _bi.get("numpy_dtype", "float64")
+                except Exception:
+                    pass
+
+            bench_c_files = sorted(f for f in output_dir.glob("bench_*.c"))
+            if not bench_c_files:
+                bench_ok = True  # nothing to benchmark
+            else:
+                all_passed = True
+                for bench_c in bench_c_files:
+                    fn_name = re.sub(r"^bench_", "", bench_c.stem)
+                    fortran_bin = baseline_dir / f"bench_{fn_name}_output.bin"
+                    fn_dtype = _s2_dtypes.get(_normalize_bench_name(fn_name), "float64")
+                    fn_atol = _ATOL_BY_DTYPE.get(fn_dtype, _DEFAULT_ATOL)
+
+                    if status_fn:
+                        status_fn(f"Running C benchmark: {bench_c.stem}…")
+                    log.info(f"Running C benchmark: {bench_c.stem}")
                     ok, err, c_bin, c_time_ms = _compile_and_run_bench(
                         output_dir,
                         bench_c,
@@ -1186,57 +1176,154 @@ def fix_c_code(
                         baseline_dir,
                         call_graph=call_graph,
                     )
-                if skip_fn_llm_repairs:
-                    bench_results[fn_name] = {
-                        "pass": False,
-                        "max_abs_diff": None,
-                        "c_time_ms": None,
-                        "reason": "non-repairable link/dependency error",
-                    }
-                    continue
-                if not bench_succeeded:
-                    all_passed = False
-                    # Report what went wrong on final failure
-                    last = bench_results.get(fn_name, {})
-                    if last.get("max_abs_diff", 0) > 0:
-                        exc = NumericalPrecisionError(fn_name, last["max_abs_diff"])
-                    elif not ok:
-                        exc = BenchmarkRuntimeError(fn_name, err)
-                    else:
-                        exc = BenchmarkRuntimeError(fn_name, "unknown failure")
-                    bench_results[fn_name] = {
-                        "pass": False,
-                        "max_abs_diff": last.get("max_abs_diff"),
-                        "c_time_ms": last.get("c_time_ms"),
-                        "reason": str(exc),
-                    }
-                    log.warning(f"  {fn_name}: benchmark validation failed after retries: {exc}")
-            bench_ok = all_passed
+                    skip_fn_llm_repairs = False
+                    bench_succeeded = False
+                    for b_attempt in range(max_retries):
+                        if ok and not fortran_bin.exists():
+                            bench_results[fn_name] = {
+                                "pass": True,
+                                "max_abs_diff": None,
+                                "c_time_ms": c_time_ms,
+                                "reason": "no Fortran baseline output to compare",
+                            }
+                            log.info(f"  {fn_name}: benchmark ran (no baseline output available for comparison)")
+                            bench_succeeded = True
+                            break
+                        if ok and c_bin and c_bin.exists():
+                            c_data = np.fromfile(str(c_bin), dtype=fn_dtype)
+                            f_data = np.fromfile(str(fortran_bin), dtype=fn_dtype)
+                            if status_fn:
+                                status_fn(f"Comparing {fn_name} output vs Fortran baseline…")
+                            if c_data.shape == f_data.shape and np.allclose(c_data, f_data, atol=fn_atol, rtol=fn_atol):
+                                bench_results[fn_name] = {"pass": True, "max_abs_diff": 0.0, "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
+                                log.info(f"  {fn_name}: numerical check PASSED, c_time_ms={c_time_ms}")
+                                bench_succeeded = True
+                                break
+                            max_abs = float(np.max(np.abs(c_data - f_data))) if c_data.shape == f_data.shape else float("inf")
+                            bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs, "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
+                            _console.print(
+                                f"  [yellow]⚠ Numerical precision failed[/yellow] for [bold]{fn_name}[/bold]: "
+                                f"max diff = [bold]{max_abs:.3e}[/bold]"
+                            )
+                            log.warning(f"  {fn_name}: numerical check FAILED, max_abs_diff={max_abs:.3e}")
+                            err = f"Numerical mismatch: max_abs_diff={max_abs:.6e}"
+                        else:
+                            if not ok:
+                                if _is_non_repairable_bench_error(err):
+                                    bench_results[fn_name] = {
+                                        "pass": False,
+                                        "max_abs_diff": None,
+                                        "c_time_ms": None,
+                                        "reason": "non-repairable link/dependency error",
+                                    }
+                                    all_passed = False
+                                    skip_fn_llm_repairs = True
+                                    log.warning(
+                                        "  %s: skipping LLM retries due to non-repairable benchmark error",
+                                        fn_name,
+                                    )
+                                    break
+                                _console.print(
+                                    f"  [yellow]⚠ C benchmark failed to run[/yellow] for [bold]{fn_name}[/bold]: "
+                                    f"[dim]{_first_error_line(err)}[/dim]"
+                                )
+                                log.warning(f"  {fn_name}: benchmark run failed: {err}")
+                        llm_log.append({
+                            "phase": "bench", "fn": fn_name, "attempt": b_attempt, "error": err,
+                        })
+                        if status_fn:
+                            status_fn(f"LLM: fixing numerical precision in {bench_c.name} (attempt {b_attempt+1}/{max_retries})…")
+                        log.info(f"LLM bench repair attempt {b_attempt+1}/{max_retries} for {bench_c.name}")
 
-    (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
-    (output_dir / "llm_conversations.json").write_text(
-        json.dumps(llm.pop_conversation_log(), indent=2)
-    )
+                        # Try to find the original Fortran source for context
+                        fortran_src = _find_fortran_source_for_function(c_dir, fn_name)
+                        _repair_file(
+                            llm,
+                            bench_c,
+                            filter_errors_for_file(err, bench_c.name),
+                            attempt=b_attempt,
+                            fortran_source=fortran_src,
+                            cache_scope=cache_scope,
+                        )
+                        llm_turns += 1
+                        total_retries += 1
+                        ok, err, c_bin, c_time_ms = _compile_and_run_bench(
+                            output_dir,
+                            bench_c,
+                            output_dir,
+                            baseline_dir,
+                            call_graph=call_graph,
+                        )
+                    if skip_fn_llm_repairs:
+                        bench_results[fn_name] = {
+                            "pass": False,
+                            "max_abs_diff": None,
+                            "c_time_ms": None,
+                            "reason": "non-repairable link/dependency error",
+                        }
+                        continue
+                    if not bench_succeeded:
+                        all_passed = False
+                        # Report what went wrong on final failure
+                        last = bench_results.get(fn_name, {})
+                        if last.get("max_abs_diff", 0) > 0:
+                            exc = NumericalPrecisionError(fn_name, last["max_abs_diff"])
+                        elif not ok:
+                            exc = BenchmarkRuntimeError(fn_name, err)
+                        else:
+                            exc = BenchmarkRuntimeError(fn_name, "unknown failure")
+                        bench_results[fn_name] = {
+                            "pass": False,
+                            "max_abs_diff": last.get("max_abs_diff"),
+                            "c_time_ms": last.get("c_time_ms"),
+                            "reason": str(exc),
+                        }
+                        log.warning(f"  {fn_name}: benchmark validation failed after retries: {exc}")
+                bench_ok = all_passed
 
-    # Refresh compile_commands after potential benchmark-file LLM edits.
-    cc_path = _write_compile_commands(output_dir)
-    log.info("Wrote compile_commands.json")
+            # Refresh compile_commands after potential benchmark-file LLM edits.
+            cc_path = _write_compile_commands(output_dir)
+            log.info("Wrote compile_commands.json")
+    except Exception as exc:
+        stage_error = _describe_stage4_error(exc)
+        if not compile_error:
+            compile_error = stage_error
+        log.exception("Stage 4 failed: %s", stage_error)
+    finally:
+        (output_dir / "llm_log.json").write_text(json.dumps(llm_log, indent=2))
+        (output_dir / "llm_conversations.json").write_text(
+            json.dumps(llm.pop_conversation_log(), indent=2)
+        )
 
-    result = {
-        "compile_ok": compile_ok,
-        "bench_ok": bench_ok,
-        "bench_results": bench_results,
-        "llm_turns": llm_turns,
-        "retries": total_retries,
-        "compile_error": compile_error if not compile_ok else "",
-        "compile_commands": str(cc_path),
-    }
-    (output_dir / "result.json").write_text(json.dumps(result, indent=2))
+        result = {
+            "compile_ok": compile_ok,
+            "bench_ok": bench_ok,
+            "bench_results": bench_results,
+            "llm_turns": llm_turns,
+            "retries": total_retries,
+            "compile_error": compile_error if not compile_ok else "",
+            "compile_commands": str(cc_path) if cc_path is not None else "",
+        }
+        if stage_error:
+            result["error"] = stage_error
+        (output_dir / "result.json").write_text(json.dumps(result, indent=2))
 
-    if status_fn:
-        status_fn("Generating Fortran vs C comparison report…")
-    log.info("Generating Fortran vs C comparison report")
-    _generate_fortran_c_report(output_dir, c_dir, baseline_dir, bench_results, llm_turns, total_retries)
-    log.info("Stage complete")
+        if status_fn:
+            status_fn("Generating Fortran vs C comparison report…")
+        log.info("Generating Fortran vs C comparison report")
+        _generate_fortran_c_report(
+            output_dir,
+            c_dir,
+            baseline_dir,
+            bench_results,
+            llm_turns,
+            total_retries,
+            entry_points=entry_points,
+        )
+        if stage_error:
+            log.info("Stage complete with failure recorded")
+        else:
+            log.info("Stage complete")
+
     return result
 

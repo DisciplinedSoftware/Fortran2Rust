@@ -125,7 +125,14 @@ class LLMClient(ABC):
             self._conversation_log = []
         return log
 
-    def repair(self, context: str, error: str, code: str, attempt: int = 0) -> str:
+    def repair(
+        self,
+        context: str,
+        error: str,
+        code: str,
+        attempt: int = 0,
+        cache_scope: str | None = None,
+    ) -> str:
         """Standard repair prompt for fixing broken code.
 
         *attempt* is zero-indexed; when > 0 a hint is added to the prompt
@@ -155,7 +162,7 @@ class LLMClient(ABC):
         # Only cache first-attempt responses: later attempts deliberately use
         # different strategies so their outputs should not be replayed.
         if attempt == 0:
-            cached = lookup(code, error, context)
+            cached = lookup(code, error, context, cache_scope=cache_scope)
             if cached is not None:
                 _console.print("  [dim]↳ repair cache hit — skipped LLM call[/dim]")
                 with self._log_lock:
@@ -172,6 +179,6 @@ class LLMClient(ABC):
         response = self.complete(system, user)
 
         if attempt == 0:
-            store(code, error, context, response)
+            store(code, error, context, response, cache_scope=cache_scope)
 
         return response

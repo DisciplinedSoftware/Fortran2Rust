@@ -115,10 +115,113 @@ def test_stage2_generates_precision_for_generic_entrypoint(monkeypatch, tmp_path
     assert (output_dir / "bench_dasum_precision.f90").exists()
     assert (output_dir / "dataset_dasum_precision_A.bin").exists()
     assert (output_dir / "dataset_dasum_precision_B.bin").exists()
+    assert (output_dir / "dataset_dasum_expected.bin").exists()
+    assert (output_dir / "dataset_dasum_precision_expected.bin").exists()
+    assert "expected" in result["datasets"]["dasum"]
     assert "dasum_precision" in result["datasets"]
+    assert "expected" in result["datasets"]["dasum_precision"]
 
     c_driver_text = (output_dir / "bench_dasum.c").read_text()
     assert "extern doublereal dasum_(integer *bench_n, doublereal *bench_dx, integer *bench_incx);" in c_driver_text
     assert "doublereal bench_result;" in c_driver_text
     assert "bench_result = dasum_(&bench_n, bench_dx, &bench_incx);" in c_driver_text
     assert "fwrite(&bench_result, sizeof(doublereal), 1, out);" in c_driver_text
+
+
+def test_stage2_daxpy_c_driver_writes_single_call_baseline(monkeypatch, tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    output_dir = tmp_path / "out"
+    source_dir.mkdir()
+
+    for name in ("daxpy.f", "lsame.f", "xerbla.f"):
+        (source_dir / name).write_text("      END\n")
+
+    dep_files = [source_dir / "daxpy.f", source_dir / "lsame.f", source_dir / "xerbla.f"]
+    call_graph = {"DAXPY": ["LSAME", "XERBLA"]}
+
+    def _fake_run(cmd, capture_output, text, timeout, cwd=None):
+        if cmd[0] == "gfortran":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        exe_name = Path(cmd[0]).name
+        run_dir = Path(cwd) if cwd else output_dir
+
+        if exe_name == "bench_daxpy":
+            (run_dir / "bench_daxpy_output.bin").write_bytes(b"\0" * 8)
+            return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.234\n", stderr="")
+
+        if exe_name == "bench_daxpy_precision":
+            (run_dir / "bench_daxpy_precision_output.bin").write_bytes(b"\0" * 8)
+            return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.111\n", stderr="")
+
+        raise AssertionError(f"Unexpected command in test: {cmd}")
+
+    monkeypatch.setattr(s2_benchmarks.subprocess, "run", _fake_run)
+
+    s2_benchmarks.generate_benchmarks(
+        source_dir=source_dir,
+        entry_points=["daxpy"],
+        dep_files=dep_files,
+        output_dir=output_dir,
+        call_graph=call_graph,
+    )
+
+    c_driver_text = (output_dir / "bench_daxpy.c").read_text()
+    assert "static doublereal bench_Y0[BENCH_N];" in c_driver_text
+    assert "memcpy(bench_Y, bench_Y0, sizeof(bench_Y));" in c_driver_text
+    assert c_driver_text.count("daxpy_(&n, &alpha, bench_X, &incx, bench_Y, &incy);") == 2
+
+
+def test_stage2_dbeg_c_driver_declares_logical_param(monkeypatch, tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    output_dir = tmp_path / "out"
+    source_dir.mkdir()
+
+    for name in ("dbeg.f", "lsame.f", "xerbla.f"):
+        (source_dir / name).write_text("      END\n")
+
+    dep_files = [source_dir / "dbeg.f", source_dir / "lsame.f", source_dir / "xerbla.f"]
+    call_graph = {"DBEG": ["LSAME", "XERBLA"]}
+
+    def _fake_parse(_fn_name, _source_dir):
+        return {
+            "is_function": True,
+            "return_type": "DOUBLE PRECISION",
+            "params": [
+                {"name": "RESET", "type": "LOGICAL", "is_array": False},
+            ],
+        }
+
+    def _fake_run(cmd, capture_output, text, timeout, cwd=None):
+        if cmd[0] == "gfortran":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        exe_name = Path(cmd[0]).name
+        run_dir = Path(cwd) if cwd else output_dir
+
+        if exe_name == "bench_dbeg":
+            (run_dir / "bench_dbeg_output.bin").write_bytes(b"\0" * 8)
+            return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.234\n", stderr="")
+
+        if exe_name == "bench_dbeg_precision":
+            (run_dir / "bench_dbeg_precision_output.bin").write_bytes(b"\0" * 8)
+            return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.111\n", stderr="")
+
+        raise AssertionError(f"Unexpected command in test: {cmd}")
+
+    monkeypatch.setattr(s2_benchmarks, "_parse_fn_signature", _fake_parse)
+    monkeypatch.setattr(s2_benchmarks.subprocess, "run", _fake_run)
+
+    s2_benchmarks.generate_benchmarks(
+        source_dir=source_dir,
+        entry_points=["dbeg"],
+        dep_files=dep_files,
+        output_dir=output_dir,
+        call_graph=call_graph,
+    )
+
+    c_driver_text = (output_dir / "bench_dbeg.c").read_text()
+    assert "logical bench_reset;" in c_driver_text
+    assert "bench_reset = 1;" in c_driver_text
+    assert "extern doublereal dbeg_(logical *bench_reset);" in c_driver_text
+    assert "dbeg_(&bench_reset);" in c_driver_text
