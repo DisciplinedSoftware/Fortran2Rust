@@ -29,10 +29,10 @@ def main():
     parser.add_argument(
         "--stages",
         type=int,
-        default=9,
+        default=None,
         metavar="N",
         choices=range(1, 10),
-        help="Run all stages from 1 through N (default: 9)",
+        help="Run all stages from 1 through N; in non-interactive mode defaults to 9",
     )
     parser.add_argument(
         "--quick",
@@ -42,8 +42,8 @@ def main():
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=5,
-        help="LLM repair retries for stages 4,6,7,8 (default: 5)",
+        default=None,
+        help="LLM repair retries for stages 4,6,7,8",
     )
     parser.add_argument(
         "--llm-provider",
@@ -90,11 +90,13 @@ def _run_non_interactive(args):
     else:
         entry_points = ["dgemm"]
 
+    stage_limit = args.stages or 9
     overrides = {
-        "max_retries": args.max_retries,
-        "stages": [s for s in range(1, args.stages + 1) if not args.quick or s not in (7, 8)],
+        "stages": [s for s in range(1, stage_limit + 1) if not args.quick or s not in (7, 8)],
         "output_dir": Path(args.output_dir),
     }
+    if args.max_retries is not None:
+        overrides["max_retries"] = args.max_retries
     if args.llm_provider:
         overrides["llm_provider"] = args.llm_provider
     if args.model:
@@ -123,8 +125,12 @@ def _run_interactive(args):
         else:
             entry_points = [e.strip() for e in args.entry_points.split(",")]
 
-    config.stages = [s for s in range(1, args.stages + 1) if not args.quick or s not in (7, 8)]
-    config.max_retries = args.max_retries
+    if args.stages is not None:
+        config.stages = [s for s in range(1, args.stages + 1) if not args.quick or s not in (7, 8)]
+    elif args.quick:
+        config.stages = [s for s in config.stages if s not in (7, 8)]
+    if args.max_retries is not None:
+        config.max_retries = args.max_retries
     config.output_dir = Path(args.output_dir)
     if args.llm_provider:
         config.llm_provider = args.llm_provider
