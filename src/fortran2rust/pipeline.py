@@ -159,6 +159,8 @@ def _evaluate_stage_result(stage_num: int, stage_result: dict) -> tuple[bool, st
                 notes.append("no Rust benchmark results")
             elif any(not bool(br.get("run_ok")) for br in bench_results.values()):
                 notes.append("Rust benchmark run failures")
+            elif any(not bool(br.get("pass", False)) for br in bench_results.values()):
+                notes.append("Rust numerical checks failed")
 
     return (len(notes) == 0), "; ".join(notes)
 
@@ -371,8 +373,10 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                             else:
                                 timing_str = None
                             detail = f"{diff_str}, {timing_str}" if timing_str else diff_str
-                            if br.get("run_ok"):
+                            if br.get("pass"):
                                 parts.append(f"[green]{fn}[/green] ✓ ({detail})")
+                            elif br.get("run_ok"):
+                                parts.append(f"[yellow]{fn}[/yellow] ⚠ (numerical mismatch: {detail})")
                             else:
                                 parts.append(f"[red]{fn}[/red] ✗ (run failed)")
                         console.print(f"  Benchmarks: {' | '.join(parts)}")

@@ -200,8 +200,8 @@ def _evaluate_stage_ok(stage_num: int, stage_result: dict) -> tuple[bool, str]:
     if isinstance(bench_results, dict):
       if not bench_results:
         notes.append("no Rust benchmark results")
-      elif any(not bool(br.get("run_ok")) for br in bench_results.values()):
-        notes.append("Rust benchmark run failures")
+      elif any(not bool(br.get("pass", br.get("run_ok"))) for br in bench_results.values()):
+        notes.append("Rust numerical checks failed")
 
   return (len(notes) == 0), "; ".join(notes)
 
@@ -252,21 +252,25 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
             log.info(f"Using bench_results from stage {stage_num}")
             break
 
+    # Normalize keys to lowercase so DGEMM / dgemm lookups always resolve
+    bench_data_lc = {k.lower(): v for k, v in bench_data.items()}
+    rust_bench_lc = {k.lower(): v for k, v in rust_bench.items()}
+
     comparison_table = []
     for ep in entry_points:
-        fortran_ms = bench_data.get(ep, {}).get("time_ms")
-        rb = rust_bench.get(ep)
+        fortran_ms = bench_data_lc.get(ep.lower(), {}).get("time_ms")
+        rb = rust_bench_lc.get(ep.lower())
 
-        if rb and rb.get("run_ok"):
+        if rb and rb.get("pass", rb.get("run_ok")):
             max_abs_diff = rb.get("max_abs_diff")
             max_rel_diff = rb.get("max_rel_diff")
             rust_ms = rb.get("time_ms")
             speedup = (fortran_ms / rust_ms) if (fortran_ms and rust_ms) else None
             status = "pass"
         elif rb:
-            max_abs_diff = None
-            max_rel_diff = None
-            rust_ms = None
+            max_abs_diff = rb.get("max_abs_diff")
+            max_rel_diff = rb.get("max_rel_diff")
+            rust_ms = rb.get("time_ms")
             speedup = None
             status = "fail"
         else:
@@ -291,10 +295,9 @@ def generate_report(run_dir: Path, config: dict, status_fn=None) -> Path:
     llm_turns_total = sum(s["llm_turns"] for s in stage_log)
     comparable_rows = [row for row in comparison_table if row["status"] in {"pass", "fail"}]
     benchmark_ok = bool(comparable_rows) and all(row["status"] == "pass" for row in comparable_rows)
-    overall_ok = (
-        all(s["ok"] for s in stage_log)
-      and benchmark_ok
-    )
+    # Overall result is based solely on whether the final Rust numerical output is correct;
+    # intermediate stage failures (e.g. c2rust partial transpile) are informational only.
+    overall_ok = benchmark_ok
     log.info(f"Stages completed: {stages_completed}/{len(STAGE_NAMES)}, LLM turns: {llm_turns_total}, overall: {'PASS' if overall_ok else 'FAIL'}")
 
     summary = {

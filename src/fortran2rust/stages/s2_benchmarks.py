@@ -1349,6 +1349,7 @@ def _make_c_generic_driver(fn_name: str, N: int,
     ct     = prec.c_type
     vector_mode = _is_vector_blas(fn_name)
     array_count_expr = "BENCH_N" if vector_mode else "(size_t)BENCH_N * BENCH_N"
+    fn_proto_decl = ""
 
     # Build typed variable declarations and the function call from the signature
     if sig is not None:
@@ -1358,7 +1359,9 @@ def _make_c_generic_driver(fn_name: str, N: int,
         inits:      list[str] = []
         reads:      list[str] = []
         call_args:  list[str] = []
+        proto_args: list[str] = []
         scalar_outputs: list[tuple[str, str]] = []
+        fn_result_output: tuple[str, str] | None = None
         arr_idx = 0
 
         for p in params:
@@ -1370,6 +1373,7 @@ def _make_c_generic_driver(fn_name: str, N: int,
             if "CHARACTER" in ptype:
                 decls.append(f"    char {cname} = 'N';")
                 call_args.append(f"&{cname}")
+                proto_args.append(f"char *{cname}")
                 char_params.append(cname)
 
             elif "INTEGER" in ptype:
@@ -1382,6 +1386,7 @@ def _make_c_generic_driver(fn_name: str, N: int,
                 else:
                     inits.append(f"    {cname} = BENCH_N;")
                 call_args.append(f"&{cname}")
+                proto_args.append(f"integer *{cname}")
 
             elif p_prec is not None:
                 pctype = p_prec.c_type
@@ -1397,6 +1402,7 @@ def _make_c_generic_driver(fn_name: str, N: int,
                     )
                     arr_idx += 1
                     call_args.append(cname)
+                    proto_args.append(f"{pctype} *{cname}")
                 else:
                     pu = pname.upper()
                     decls.append(f"    {pctype} {cname};")
@@ -1405,14 +1411,36 @@ def _make_c_generic_driver(fn_name: str, N: int,
                         inits.append(f"    *((double *)&{cname}) = 1.0;  /* alpha = 1 */")
                     scalar_outputs.append((cname, pctype))
                     call_args.append(f"&{cname}")
+                    proto_args.append(f"{pctype} *{cname}")
             else:
                 decls.append(f"    /* TODO: {ptype} {cname}; */")
                 call_args.append(f"&{cname}")
+                proto_args.append(f"void *{cname}")
 
         # Append ftnlen=1 for each CHARACTER parameter
         ftnlen_args = ["1"] * len(char_params)
-        all_args = call_args + ftnlen_args
-        call_line = f"    {fn_ext}({', '.join(all_args)});"
+        proto_args.extend(f"ftnlen {name}_len" for name in char_params)
+
+        if sig.get("is_function"):
+            return_type = (sig.get("return_type") or "").upper()
+            return_prec = _FORTRAN_TYPE_TO_PREC.get(return_type)
+            if return_prec is not None:
+                fn_ret_ctype = return_prec.c_type
+            elif "INTEGER" in return_type:
+                fn_ret_ctype = "integer"
+            else:
+                fn_ret_ctype = "int"
+
+            ret_var = "bench_result"
+            decls.append(f"    {fn_ret_ctype} {ret_var};")
+            all_args = call_args + ftnlen_args
+            call_line = f"    {ret_var} = {fn_ext}({', '.join(all_args)});"
+            fn_result_output = (ret_var, fn_ret_ctype)
+            fn_proto_decl = f"extern {fn_ret_ctype} {fn_ext}({', '.join(proto_args)});"
+        else:
+            all_args = call_args + ftnlen_args
+            call_line = f"    {fn_ext}({', '.join(all_args)});"
+            fn_proto_decl = f"extern int {fn_ext}({', '.join(proto_args)});"
 
         # Determine output array (last float array in params)
         float_arrays = [
@@ -1420,7 +1448,11 @@ def _make_c_generic_driver(fn_name: str, N: int,
             for p in params
             if p["is_array"] and p["type"] in _FORTRAN_TYPE_TO_PREC
         ]
-        if float_arrays:
+        if fn_result_output is not None:
+            out_arr_expr = f"&{fn_result_output[0]}"
+            out_ctype = fn_result_output[1]
+            out_count = "1"
+        elif float_arrays:
             out_arr_expr = f"bench_{float_arrays[-1]}"
             out_ctype = ct
             out_count = array_count_expr
@@ -1462,6 +1494,8 @@ def _make_c_generic_driver(fn_name: str, N: int,
 #include "f2c.h"
 
 #define BENCH_N {N}
+
+{fn_proto_decl}
 
 static void read_bin(const char *path, {ct} *buf, size_t count) {{
     FILE *fp = fopen(path, "rb");

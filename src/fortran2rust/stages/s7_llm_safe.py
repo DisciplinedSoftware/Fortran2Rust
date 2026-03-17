@@ -94,6 +94,7 @@ def make_safe(
     llm_log: list[dict] = []
     llm_turns = 0
     retries = 0
+    reverted_for_numerics = False
 
     rs_files = [
         f for f in output_dir.rglob("*.rs")
@@ -244,8 +245,40 @@ def make_safe(
         status_fn("Running Rust benchmarks…")
     log.info("Running Rust benchmarks")
     bench_results = run_rust_benchmarks(output_dir, baseline_dir, cargo_toml, log, status_fn)
+    numeric_failures = [
+        fn_name
+        for fn_name, br in bench_results.items()
+        if bool(br.get("run_ok")) and not bool(br.get("pass", False))
+    ]
+    if numeric_failures and files_to_process:
+        reverted_for_numerics = True
+        log.warning(
+            "Safe rewrite caused numerical regressions; reverting rewritten files: %s",
+            ", ".join(f.name for f, _ in files_to_process),
+        )
+        _console.print(
+            "  [yellow]⚠ Safe rewrite regressed numerical correctness[/yellow]: "
+            + ", ".join(numeric_failures)
+        )
+        if status_fn:
+            status_fn("Reverting safe rewrites after numerical regression…")
+        for rs_file, _ in files_to_process:
+            original = rust_dir / rs_file.relative_to(output_dir)
+            if original.exists():
+                shutil.copy(original, rs_file)
+        build_ok, build_output = _cargo_build(cargo_toml)
+        with open(cargo_build_log, "a") as fh:
+            fh.write(
+                "=== reverted after numerical regression ===\n"
+                f"{build_output}\n=== EXIT: {'OK' if build_ok else 'FAIL'} ===\n\n"
+            )
+        if build_ok:
+            bench_results = run_rust_benchmarks(output_dir, baseline_dir, cargo_toml, log, status_fn)
+        else:
+            log.warning("Build failed after reverting safe rewrites")
     print_bench_summary(bench_results, {})
     result["bench_results"] = bench_results
+    result["reverted_for_numerics"] = reverted_for_numerics
 
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
     log.info("Stage complete")

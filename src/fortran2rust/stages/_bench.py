@@ -13,6 +13,9 @@ from .s2_benchmarks import _blas_precision
 
 _console = Console(stderr=True)
 
+_NUMERIC_ATOL = 1e-10
+_NUMERIC_RTOL = 1e-10
+
 # Must match the package name in the Cargo.toml template (s5_c2rust.py)
 _CRATE_NAME = "fortran2rust_output"
 
@@ -203,7 +206,7 @@ def run_rust_benchmarks(
       - Compares bench_{fn}_output.bin against baseline_dir/bench_{fn}_output.bin
       - Saves rust_bench_{fn}.log
 
-    Returns {fn_name: {run_ok, time_ms, max_abs_diff, run_error}}.
+    Returns {fn_name: {run_ok, pass, time_ms, max_abs_diff, run_error}}.
     """
     src_dir = output_dir / "src"
 
@@ -308,6 +311,7 @@ def run_rust_benchmarks(
 
         entry: dict = {
             "run_ok": run.returncode == 0,
+            "pass": False,
             "time_ms": None,
             "max_abs_diff": None,
             "max_rel_diff": None,
@@ -332,13 +336,21 @@ def run_rust_benchmarks(
                     entry["max_rel_diff"] = float(
                         np.max(abs_diff / np.maximum(np.abs(f_data), 1e-10))
                     )
+                    entry["pass"] = bool(
+                        entry["max_abs_diff"] <= _NUMERIC_ATOL
+                        or entry["max_rel_diff"] <= _NUMERIC_RTOL
+                    )
                     log.info(
                         f"  {fn_name}: max_abs_diff={entry['max_abs_diff']:.3e}"
                         f", time_ms={entry['time_ms']}"
                     )
                 else:
+                    entry["run_error"] = (
+                        f"Shape mismatch: Rust output {r_data.shape} vs Fortran baseline {f_data.shape}"
+                    )
                     log.warning(f"  {fn_name}: shape mismatch {r_data.shape} vs {f_data.shape}")
             else:
+                entry["run_error"] = "Rust benchmark output binary was not produced"
                 log.warning(f"  {fn_name}: output binary not found after run")
 
         results[fn_name] = entry
@@ -363,8 +375,10 @@ def print_bench_summary(bench_results: dict[str, dict], fortran_times: dict[str,
         else:
             timing_str = None
         detail = f"{diff_str}, {timing_str}" if timing_str else diff_str
-        if br.get("run_ok"):
+        if br.get("pass"):
             parts.append(f"[green]{fn_name}[/green] ✓ ({detail})")
+        elif br.get("run_ok"):
+            parts.append(f"[yellow]{fn_name}[/yellow] ⚠ (numerical mismatch: {detail})")
         else:
             parts.append(f"[red]{fn_name}[/red] ✗ (run failed)")
     _console.print(f"  Benchmarks: {' | '.join(parts)}")

@@ -33,6 +33,116 @@ def _llm_eligible_rust_file(rs_file: Path) -> bool:
     return len(compact_code) <= _MAX_LLM_RUST_CHARS
 
 
+def _load_stage4_c_files(rust_dir: Path) -> list[Path]:
+    run_dir = rust_dir.parent
+    s4_dirs = sorted(d for d in run_dir.iterdir() if d.is_dir() and d.name.startswith("s4_"))
+    if not s4_dirs:
+        return []
+
+    compile_commands = s4_dirs[0] / "compile_commands.json"
+    if not compile_commands.exists():
+        return []
+
+    try:
+        entries = json.loads(compile_commands.read_text())
+    except json.JSONDecodeError:
+        return []
+
+    c_files: list[Path] = []
+    for entry in entries:
+        file_value = entry.get("file")
+        if not file_value:
+            continue
+        file_path = Path(file_value)
+        if not file_path.is_absolute():
+            directory = Path(entry.get("directory") or compile_commands.parent)
+            file_path = (directory / file_path).resolve()
+        if file_path.name.startswith("bench_"):
+            continue
+        c_files.append(file_path)
+    return c_files
+
+
+def _load_c2rust_stderr(rust_dir: Path) -> str:
+    c2rust_result = rust_dir / "c2rust_result.json"
+    if not c2rust_result.exists():
+        return ""
+    try:
+        return str(json.loads(c2rust_result.read_text()).get("stderr", ""))
+    except json.JSONDecodeError:
+        return ""
+
+
+def _rewrite_lib_rs(src_dir: Path) -> None:
+    modules = sorted(
+        f.stem for f in src_dir.glob("*.rs")
+        if f.name != "lib.rs"
+    )
+    lib_rs = src_dir / "lib.rs"
+    mod_lines = "\n".join(f"pub mod {module};" for module in modules)
+    lib_rs.write_text(
+        "#![allow(unused)]\n"
+        "#![allow(non_snake_case)]\n"
+        "#![allow(non_camel_case_types)]\n\n"
+        f"{mod_lines}\n"
+    )
+
+
+def _llm_convert_missing_stage5_modules(
+    rust_dir: Path,
+    src_dir: Path,
+    output_dir: Path,
+    llm: "LLMClient",
+    llm_log: list[dict],
+    log,
+    status_fn=None,
+) -> list[str]:
+    c2rust_stderr = _load_c2rust_stderr(rust_dir)
+    missing_c_files = [
+        c_file for c_file in _load_stage4_c_files(rust_dir)
+        if not (src_dir / f"{c_file.stem}.rs").exists()
+    ]
+    if not missing_c_files:
+        return []
+
+    if status_fn:
+        status_fn(f"LLM: converting {len(missing_c_files)} C file(s) skipped by c2rust…")
+
+    converted_modules: list[str] = []
+    for c_file in missing_c_files:
+        target_rs = src_dir / f"{c_file.stem}.rs"
+        error_context = filter_errors_for_file(c2rust_stderr, c_file.name)
+        if error_context == c2rust_stderr and c2rust_stderr.strip() and c_file.name not in c2rust_stderr:
+            error_context = (
+                f"c2rust did not generate {target_rs.name} for {c_file.name}.\n\n"
+                f"Full c2rust stderr:\n{c2rust_stderr}"
+            )
+        elif not error_context.strip():
+            error_context = f"c2rust did not generate {target_rs.name} for {c_file.name}."
+
+        response = llm.repair(
+            context=(
+                "Convert this C file into a single Rust module for this crate. "
+                "Preserve the exported function names and FFI-compatible signatures, "
+                "prefer the same top-level items c2rust would emit, and return ONLY the complete Rust file."
+            ),
+            error=error_context,
+            code=c_file.read_text(),
+        )
+        _apply_llm_response(response, output_dir, target_rs, {})
+        converted_modules.append(c_file.stem)
+        llm_log.append({
+            "phase": "preconvert",
+            "file": c_file.name,
+            "rust_file": target_rs.name,
+            "error": error_context,
+        })
+        log.info("LLM converted missing Rust module %s from %s", target_rs.name, c_file.name)
+
+    _rewrite_lib_rs(src_dir)
+    return converted_modules
+
+
 def _apply_llm_response(
     response: str,
     output_dir: Path,
@@ -78,10 +188,25 @@ def fix_rust_code(
     if output_dir != rust_dir:
         shutil.copytree(rust_dir, output_dir, dirs_exist_ok=True)
 
+    llm_log: list[dict] = []
+    llm_turns = 0
+    retries = 0
+
+    src_dir = output_dir / "src"
+    preconverted_modules = _llm_convert_missing_stage5_modules(
+        rust_dir,
+        src_dir,
+        output_dir,
+        llm,
+        llm_log,
+        log,
+        status_fn=status_fn,
+    )
+    llm_turns += len(preconverted_modules)
+
     # Patch c2rust extern types before the first build to avoid a wasted LLM retry.
     # Apply to all .rs files — not just bench_*.rs — because lib files such as xerbla.rs
     # also contain `#![feature(extern_types)]` and opaque extern type declarations.
-    src_dir = output_dir / "src"
     for rs in sorted(src_dir.glob("*.rs")):
         _fix_bench_extern_types(rs)
         _fix_stable_rust_features(rs)
@@ -89,9 +214,6 @@ def fix_rust_code(
 
     cargo_toml = output_dir / "Cargo.toml"
     cargo_build_log = output_dir / "cargo_build.log"
-    llm_log: list[dict] = []
-    llm_turns = 0
-    retries = 0
 
     # ── Compilation repair loop (LLM gated) ──────────────────────────────────
     if status_fn:
@@ -191,6 +313,7 @@ def fix_rust_code(
     result = {
         "llm_turns": llm_turns,
         "retries": retries,
+        "preconverted_modules": preconverted_modules,
         "bench_results": bench_results,
     }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))

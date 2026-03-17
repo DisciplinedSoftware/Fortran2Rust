@@ -124,6 +124,7 @@ def make_idiomatic(
     llm_turns = 0
     retries = 0
     reverted_for_performance = False
+    reverted_for_numerics = False
     previous_bench_results = _load_previous_bench_results(rust_dir)
 
     rs_files = [
@@ -261,20 +262,34 @@ def make_idiomatic(
         status_fn("Running Rust benchmarks…")
     log.info("Running Rust benchmarks")
     bench_results = run_rust_benchmarks(output_dir, baseline_dir, cargo_toml, log, status_fn)
+    numeric_failures = [
+        fn_name
+        for fn_name, br in bench_results.items()
+        if bool(br.get("run_ok")) and not bool(br.get("pass", False))
+    ]
     regressions = _find_bench_regressions(previous_bench_results, bench_results)
-    if regressions:
-        reverted_for_performance = True
+    if regressions or numeric_failures:
+        if regressions:
+            reverted_for_performance = True
+        if numeric_failures:
+            reverted_for_numerics = True
         log.warning(
-            "Idiomatic rewrite caused benchmark regressions; reverting rewritten files: "
-            f"{regressions}"
+            "Idiomatic rewrite caused benchmark regressions; reverting rewritten files: %s",
+            regressions,
         )
-        _console.print(
-            "  [yellow]⚠ Idiomatic rewrite regressed benchmark performance[/yellow]: "
-            + ", ".join(
-                f"{r['function']} {r['current_ms']:.1f}ms vs {r['previous_ms']:.1f}ms ({r['ratio']:.2f}x)"
-                for r in regressions
+        if regressions:
+            _console.print(
+                "  [yellow]⚠ Idiomatic rewrite regressed benchmark performance[/yellow]: "
+                + ", ".join(
+                    f"{r['function']} {r['current_ms']:.1f}ms vs {r['previous_ms']:.1f}ms ({r['ratio']:.2f}x)"
+                    for r in regressions
+                )
             )
-        )
+        if numeric_failures:
+            _console.print(
+                "  [yellow]⚠ Idiomatic rewrite regressed numerical correctness[/yellow]: "
+                + ", ".join(numeric_failures)
+            )
         if status_fn:
             status_fn("Reverting idiomatic rewrites after benchmark regression…")
         for rs_file in rs_files:
@@ -294,8 +309,11 @@ def make_idiomatic(
     print_bench_summary(bench_results, {})
     result["bench_results"] = bench_results
     result["reverted_for_performance"] = reverted_for_performance
+    result["reverted_for_numerics"] = reverted_for_numerics
     if regressions:
         result["performance_regressions"] = regressions
+    if numeric_failures:
+        result["numeric_regressions"] = numeric_failures
 
     (output_dir / "result.json").write_text(json.dumps(result, indent=2))
     log.info("Stage complete")

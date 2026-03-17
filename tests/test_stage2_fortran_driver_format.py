@@ -116,3 +116,9 @@ def test_stage2_generates_precision_for_generic_entrypoint(monkeypatch, tmp_path
     assert (output_dir / "dataset_dasum_precision_A.bin").exists()
     assert (output_dir / "dataset_dasum_precision_B.bin").exists()
     assert "dasum_precision" in result["datasets"]
+
+    c_driver_text = (output_dir / "bench_dasum.c").read_text()
+    assert "extern doublereal dasum_(integer *bench_n, doublereal *bench_dx, integer *bench_incx);" in c_driver_text
+    assert "doublereal bench_result;" in c_driver_text
+    assert "bench_result = dasum_(&bench_n, bench_dx, &bench_incx);" in c_driver_text
+    assert "fwrite(&bench_result, sizeof(doublereal), 1, out);" in c_driver_text

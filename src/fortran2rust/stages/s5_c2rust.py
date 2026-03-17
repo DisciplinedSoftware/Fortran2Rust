@@ -21,6 +21,21 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 """
 
 
+def _load_compile_command_c_files(compile_commands: Path) -> list[Path]:
+    entries = json.loads(compile_commands.read_text())
+    files: list[Path] = []
+    for entry in entries:
+        file_value = entry.get("file")
+        if not file_value:
+            continue
+        file_path = Path(file_value)
+        if not file_path.is_absolute():
+            directory = Path(entry.get("directory") or compile_commands.parent)
+            file_path = (directory / file_path).resolve()
+        files.append(file_path)
+    return files
+
+
 def ensure_c2rust(status_fn=None) -> Path:
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -60,6 +75,8 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
     # c2rust requires absolute paths — relative paths cause a canonicalize panic
     compile_commands = compile_commands.resolve()
     output_dir_abs = output_dir.resolve()
+    c_input_files = [f for f in _load_compile_command_c_files(compile_commands) if not f.name.startswith("bench_")]
+    expected_modules = sorted({f.stem for f in c_input_files})
     log.info(f"transpile_to_rust: compile_commands={compile_commands}, output_dir={output_dir_abs}")
 
     if status_fn:
@@ -103,10 +120,17 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         f for f in rust_files
         if f.parent == src_dir and f.name != "lib.rs" and not f.name.startswith("bench_")
     ]
+    generated_modules = sorted({f.stem for f in lib_modules})
+    missing_modules = sorted(set(expected_modules) - set(generated_modules))
     if not lib_modules:
         raise ConversionError(
             "c2rust",
             "No library Rust modules were generated (only benchmark/transient files).",
+        )
+    if missing_modules:
+        log.warning(
+            "c2rust did not generate Rust modules for C file(s): %s",
+            ", ".join(missing_modules),
         )
 
     if status_fn:
@@ -138,6 +162,9 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         "ok": ok,
         "stderr": result.stderr,
         "stdout": result.stdout,
+        "expected_modules": expected_modules,
+        "generated_modules": generated_modules,
+        "missing_modules": missing_modules,
     }, indent=2))
 
     log.info("Stage complete")
@@ -146,4 +173,7 @@ def transpile_to_rust(c_dir: Path, compile_commands: Path, output_dir: Path, sta
         "cargo_toml": str(cargo_toml_path),
         "ok": ok,
         "stderr": result.stderr,
+        "expected_modules": expected_modules,
+        "generated_modules": generated_modules,
+        "missing_modules": missing_modules,
     }
