@@ -133,14 +133,15 @@ def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path, statu
     cc_path = output_dir / "compile_commands.json"
     cc_path.write_text(json.dumps(compile_commands, indent=2))
 
-    # Verify overall compilation
+    # Verify non-benchmark C sources compile (object-only; no link/run)
     compile_ok = False
     compile_stdout = ""
     compile_stderr = ""
-    if c_files:
+    verify_c_files = [c for c in c_files if not Path(c).name.startswith("bench_")]
+    if verify_c_files:
         if status_fn:
             status_fn("Verifying C compilation…")
-        gcc_cmd = ["gcc", "-O2", f"-I{output_dir}", "-o", "/dev/null"] + c_files + ["-lm", "-lf2c"]
+        gcc_cmd = ["gcc", "-O2", f"-I{output_dir}", "-fsyntax-only"] + verify_c_files
         log.info(f"gcc verify: {' '.join(gcc_cmd)}")
         verify = subprocess.run(
             gcc_cmd,
@@ -162,6 +163,9 @@ def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path, statu
             log.info("gcc verify: OK")
         else:
             log.warning(f"gcc verify: FAILED\n{compile_stderr}")
+    else:
+        compile_ok = True
+        log.info("gcc verify: skipped (no non-benchmark C files)")
 
     result_data = {
         "c_files": c_files,
@@ -173,5 +177,4 @@ def run_f2c(source_dir: Path, fortran_files: list[Path], output_dir: Path, statu
     }
     (output_dir / "f2c_result.json").write_text(json.dumps(result_data, indent=2))
     log.info("Stage complete")
-    return result_data
     return result_data

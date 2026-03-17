@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +16,13 @@ from ..exceptions import BenchmarkRuntimeError, CompilationError
 from ._log import make_stage_logger
 
 N_DEFAULT = 500  # matrix size giving ~1ms per DGEMM call
+N_MIN = 64
+N_MAX = 2000
+TARGET_TIME_MS_MIN = 1.0
+TARGET_TIME_MS_MAX = 100.0
+MAX_CALIBRATION_STEPS = 6
+VECTOR_N_MAX = 32_000
+VECTOR_CALIBRATION_STEPS = 7
 
 
 # ── Precision type system ──────────────────────────────────────────────────────
@@ -196,6 +206,130 @@ KNOWN_BLAS = {
 }
 
 KNOWN_GEMM = {"DGEMM", "SGEMM", "ZGEMM", "CGEMM"}
+KNOWN_VECTOR_BLAS = {
+    "DASUM", "SASUM", "DNRM2", "SNRM2", "DDOT", "SDOT",
+    "IDAMAX", "ISAMAX", "DAXPY", "SAXPY", "DCOPY", "SCOPY", "DSCAL", "SSCAL",
+}
+
+
+def _is_vector_blas(fn_name: str) -> bool:
+    return fn_name.upper() in KNOWN_VECTOR_BLAS
+
+
+def _resolve_fortran_deps(
+    source_dir: Path,
+    dep_files: list[Path],
+    call_graph: dict[str, list[str]] | None,
+    ep_upper: str,
+) -> list[str]:
+    """Resolve Fortran dependency source files for compiling a benchmark driver."""
+    fortran_dep_paths: list[Path] = [Path(f).resolve() for f in dep_files if Path(f).exists()]
+    extra_symbols = set((call_graph or {}).get(ep_upper, []))
+    extra_symbols.add(ep_upper)
+    for sym in extra_symbols:
+        sym_lower = sym.lower()
+        for ext in (".f", ".f90"):
+            candidate = source_dir / f"{sym_lower}{ext}"
+            if candidate.exists():
+                fortran_dep_paths.append(candidate.resolve())
+    return [str(p) for p in sorted(set(fortran_dep_paths))]
+
+
+def _make_fortran_driver_source(fn_name: str, n: int, sig: dict | None, prec: _Precision) -> str:
+    """Return the standard Fortran benchmark driver source for *fn_name* at size *n*."""
+    fn_upper = fn_name.upper()
+    if fn_upper in KNOWN_GEMM:
+        return _make_dgemm_driver(fn_name, n, prec)
+    if fn_upper.endswith("AXPY") and not prec.is_complex:
+        return _make_axpy_driver(fn_name, n, prec)
+    return _make_generic_driver(fn_name, n, sig, prec)
+
+
+def _calibrate_benchmark_size(
+    fn_name: str,
+    source_dir: Path,
+    dep_files: list[Path],
+    output_dir: Path,
+    call_graph: dict[str, list[str]] | None,
+    sig: dict | None,
+    prec: _Precision,
+    log,
+    status_fn=None,
+) -> int:
+    """
+    Choose a dataset size N for benchmarking by iterating until measured runtime
+    for a single call lands in [TARGET_TIME_MS_MIN, TARGET_TIME_MS_MAX].
+    """
+    fn_upper = fn_name.upper()
+    fn_lower = fn_name.lower()
+    n = N_DEFAULT
+    n_max = VECTOR_N_MAX if _is_vector_blas(fn_name) else N_MAX
+    max_steps = VECTOR_CALIBRATION_STEPS if _is_vector_blas(fn_name) else MAX_CALIBRATION_STEPS
+    fortran_deps = _resolve_fortran_deps(source_dir, dep_files, call_graph, fn_upper)
+
+    for step in range(max_steps):
+        if status_fn:
+            status_fn(f"Calibrating benchmark size for {fn_name} (N={n})…")
+        log.info(f"Calibrating {fn_name}: attempt {step + 1}/{max_steps}, N={n}")
+
+        generate_dataset(fn_name, n, output_dir, prec=prec)
+        driver_src = _make_fortran_driver_source(fn_name, n, sig, prec)
+        driver_file = output_dir / f"bench_{fn_lower}_calib.f90"
+        driver_file.write_text(driver_src)
+        exe_path = output_dir / f"bench_{fn_lower}_calib"
+        compile_cmd = [
+            "gfortran", "-O2",
+            "-ffunction-sections", "-fdata-sections",
+            str(driver_file.resolve()),
+            *fortran_deps,
+            "-Wl,--gc-sections", "-Wl,--allow-multiple-definition", "-lm",
+            "-o", str(exe_path.resolve()),
+        ]
+
+        try:
+            result = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                log.warning(f"  Calibration compile failed for {fn_name} at N={n}; using default N={N_DEFAULT}")
+                return N_DEFAULT
+
+            run_result = subprocess.run(
+                [str(exe_path.resolve())],
+                capture_output=True,
+                text=True,
+                cwd=str(output_dir.resolve()),
+                timeout=300,
+            )
+            if run_result.returncode != 0:
+                log.warning(f"  Calibration run failed for {fn_name} at N={n}; using default N={N_DEFAULT}")
+                return N_DEFAULT
+
+            match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", run_result.stdout)
+            if not match:
+                log.warning(f"  Calibration could not parse timing for {fn_name} at N={n}; using current N")
+                return n
+
+            elapsed_ms = float(match.group(1))
+            log.info(f"  Calibration timing for {fn_name}: N={n}, t={elapsed_ms:.4f} ms")
+
+            if TARGET_TIME_MS_MIN <= elapsed_ms <= TARGET_TIME_MS_MAX:
+                return n
+            if elapsed_ms < TARGET_TIME_MS_MIN:
+                if n >= n_max:
+                    break
+                n = min(n_max, n * 2)
+            else:
+                if n <= N_MIN:
+                    break
+                n = max(N_MIN, n // 2)
+        except Exception as e:
+            log.warning(f"  Calibration exception for {fn_name} at N={n}: {e}; using default N={N_DEFAULT}")
+            return N_DEFAULT
+
+    log.warning(
+        f"  Calibration for {fn_name} ended at N={n} outside target "
+        f"[{TARGET_TIME_MS_MIN:.1f}, {TARGET_TIME_MS_MAX:.1f}] ms"
+    )
+    return n
 
 
 def generate_precision_dataset(fn_name: str, N: int, output_dir: Path,
@@ -205,12 +339,20 @@ def generate_precision_dataset(fn_name: str, N: int, output_dir: Path,
     fn_lo = fn_name.lower()
     dtype = np.dtype(prec.numpy_dtype)
     EPS = 1e-8
-    if prec.is_complex:
-        A = (1.0 + EPS * (rng.random((N, N)) - 0.5) + 1j * EPS * (rng.random((N, N)) - 0.5)).astype(dtype)
-        B = (1.0 + EPS * (rng.random((N, N)) - 0.5) + 1j * EPS * (rng.random((N, N)) - 0.5)).astype(dtype)
+    if _is_vector_blas(fn_name):
+        if prec.is_complex:
+            A = (1.0 + EPS * (rng.random(N) - 0.5) + 1j * EPS * (rng.random(N) - 0.5)).astype(dtype)
+            B = (1.0 + EPS * (rng.random(N) - 0.5) + 1j * EPS * (rng.random(N) - 0.5)).astype(dtype)
+        else:
+            A = (1.0 + EPS * (rng.random(N).astype(dtype) - 0.5))
+            B = (1.0 + EPS * (rng.random(N).astype(dtype) - 0.5))
     else:
-        A = (1.0 + EPS * (rng.random((N, N)).astype(dtype) - 0.5))
-        B = (1.0 + EPS * (rng.random((N, N)).astype(dtype) - 0.5))
+        if prec.is_complex:
+            A = (1.0 + EPS * (rng.random((N, N)) - 0.5) + 1j * EPS * (rng.random((N, N)) - 0.5)).astype(dtype)
+            B = (1.0 + EPS * (rng.random((N, N)) - 0.5) + 1j * EPS * (rng.random((N, N)) - 0.5)).astype(dtype)
+        else:
+            A = (1.0 + EPS * (rng.random((N, N)).astype(dtype) - 0.5))
+            B = (1.0 + EPS * (rng.random((N, N)).astype(dtype) - 0.5))
     a_path = output_dir / f"dataset_{fn_lo}_precision_A.bin"
     b_path = output_dir / f"dataset_{fn_lo}_precision_B.bin"
     A.flatten(order="F").tofile(str(a_path))
@@ -226,14 +368,24 @@ def generate_dataset(fn_name: str, N: int, output_dir: Path,
     dtype = np.dtype(prec.numpy_dtype)
 
     if fn_upper in KNOWN_BLAS:
-        if prec.is_complex:
-            A = (rng.random((N, N)) + 1j * rng.random((N, N))).astype(dtype)
-            B = (rng.random((N, N)) + 1j * rng.random((N, N))).astype(dtype)
-            params = np.array([1.0 + 0j, 0.0 + 0j], dtype=dtype)
+        if _is_vector_blas(fn_name):
+            if prec.is_complex:
+                A = (rng.random(N) + 1j * rng.random(N)).astype(dtype)
+                B = (rng.random(N) + 1j * rng.random(N)).astype(dtype)
+                params = np.array([1.0 + 0j, 0.0 + 0j], dtype=dtype)
+            else:
+                A = rng.random(N).astype(dtype)
+                B = rng.random(N).astype(dtype)
+                params = np.array([1.0, 0.0], dtype=dtype)
         else:
-            A = rng.random((N, N)).astype(dtype)
-            B = rng.random((N, N)).astype(dtype)
-            params = np.array([1.0, 0.0], dtype=dtype)
+            if prec.is_complex:
+                A = (rng.random((N, N)) + 1j * rng.random((N, N))).astype(dtype)
+                B = (rng.random((N, N)) + 1j * rng.random((N, N))).astype(dtype)
+                params = np.array([1.0 + 0j, 0.0 + 0j], dtype=dtype)
+            else:
+                A = rng.random((N, N)).astype(dtype)
+                B = rng.random((N, N)).astype(dtype)
+                params = np.array([1.0, 0.0], dtype=dtype)
 
         a_path = output_dir / f"dataset_{fn_name.lower()}_A.bin"
         b_path = output_dir / f"dataset_{fn_name.lower()}_B.bin"
@@ -271,8 +423,7 @@ def _make_dgemm_driver(fn_name: str, N: int, prec: _Precision) -> str:
       INTEGER, PARAMETER :: N = {N}
       {ftype} :: A(N,N), B(N,N), C(N,N)
       {ftype} :: ALPHA, BETA
-      INTEGER :: ITER, COUNT_RATE, T1, T2
-      DOUBLE PRECISION :: ELAPSED
+            DOUBLE PRECISION :: ELAPSED, T1, T2
       INTEGER :: I, J
 
     ! Load shared dataset (raw binary, column-major)
@@ -296,20 +447,17 @@ def _make_dgemm_driver(fn_name: str, N: int, prec: _Precision) -> str:
       END DO
 
       ! Time ONLY the computation, not I/O
-      CALL SYSTEM_CLOCK(COUNT_RATE=COUNT_RATE)
-      CALL SYSTEM_CLOCK(T1)
-      DO ITER = 1, 10
-        CALL {fn_up}('N','N',N,N,N,ALPHA,A,N,B,N,BETA,C,N)
-      END DO
-      CALL SYSTEM_CLOCK(T2)
-      ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
+            CALL CPU_TIME(T1)
+            CALL {fn_up}('N','N',N,N,N,ALPHA,A,N,B,N,BETA,C,N)
+            CALL CPU_TIME(T2)
+            ELAPSED = (T2-T1) * 1000.0D0
 
     ! Write output (column-major raw binary for numpy comparison)
     OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
       WRITE(13) C
       CLOSE(13)
 
-      WRITE(*,'(A,F12.4)') 'FORTRAN_TIME_MS=', ELAPSED
+    WRITE(*,'(A,F16.8)') 'FORTRAN_TIME_MS=', ELAPSED
       END PROGRAM
 """
 
@@ -367,8 +515,7 @@ IMPLICIT NONE
 INTEGER, PARAMETER :: N = {N}
 {ftype} :: X(N), Y(N), ALPHA
 INTEGER :: INCX, INCY
-INTEGER :: ITER, COUNT_RATE, T1, T2
-DOUBLE PRECISION :: ELAPSED
+DOUBLE PRECISION :: ELAPSED, T1, T2
 
 OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
 READ(10) X
@@ -385,19 +532,16 @@ CLOSE(12)
 INCX = 1
 INCY = 1
 
-CALL SYSTEM_CLOCK(COUNT_RATE=COUNT_RATE)
-CALL SYSTEM_CLOCK(T1)
-DO ITER = 1, 10
-    CALL {fn_up}(N, ALPHA, X, INCX, Y, INCY)
-END DO
-CALL SYSTEM_CLOCK(T2)
-ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
+CALL CPU_TIME(T1)
+CALL {fn_up}(N, ALPHA, X, INCX, Y, INCY)
+CALL CPU_TIME(T2)
+ELAPSED = (T2-T1) * 1000.0D0
 
 OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
 WRITE(13) Y
 CLOSE(13)
 
-WRITE(*,'(A,F12.4)') 'FORTRAN_TIME_MS=', ELAPSED
+WRITE(*,'(A,F16.8)') 'FORTRAN_TIME_MS=', ELAPSED
 END PROGRAM
 """
 
@@ -447,6 +591,7 @@ def _make_generic_driver(fn_name: str, N: int,
     """
     fn_up = fn_name.upper()
     fn_lo = fn_name.lower()
+    vector_mode = _is_vector_blas(fn_name)
 
     if sig is None:
         # Fallback: typed placeholder with the dominant precision
@@ -459,8 +604,7 @@ def _make_generic_driver(fn_name: str, N: int,
       INTEGER, PARAMETER :: N = {N}
       {ftype} :: A(N,N), B(N,N), C(N,N)
       {ftype} :: ALPHA, BETA
-      INTEGER :: ITER, COUNT_RATE, T1, T2
-      DOUBLE PRECISION :: ELAPSED
+    DOUBLE PRECISION :: ELAPSED, T1, T2
       INTEGER :: I, J
 
     OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
@@ -478,23 +622,19 @@ def _make_generic_driver(fn_name: str, N: int,
         END DO
       END DO
 
-      CALL SYSTEM_CLOCK(COUNT_RATE=COUNT_RATE)
-      CALL SYSTEM_CLOCK(T1)
-      DO ITER = 1, 10
-        ! TODO: replace with the correct {fn_up}(...) call
-        CALL {fn_up}('N','N',N,N,N,ALPHA,A,N,B,N,BETA,C,N)
-      END DO
-      CALL SYSTEM_CLOCK(T2)
-      ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
+            CALL CPU_TIME(T1)
+            ! TODO: replace with the correct {fn_up}(...) call
+            CALL {fn_up}('N','N',N,N,N,ALPHA,A,N,B,N,BETA,C,N)
+            CALL CPU_TIME(T2)
+            ELAPSED = (T2-T1) * 1000.0D0
 
     OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
       WRITE(13) C
       CLOSE(13)
 
-      WRITE(*,'(A,F12.4)') 'FORTRAN_TIME_MS=', ELAPSED
+    WRITE(*,'(A,F16.8)') 'FORTRAN_TIME_MS=', ELAPSED
       END PROGRAM
 """
-
     # ── Signature-aware driver ────────────────────────────────────────────────
     params     = sig["params"]
     is_fn      = sig["is_function"]
@@ -534,7 +674,10 @@ def _make_generic_driver(fn_name: str, N: int,
 
         elif p_prec is not None:
             if p["is_array"]:
-                decls.append(f"      {ptype} :: {bvar}(N,N)")
+                if vector_mode:
+                    decls.append(f"      {ptype} :: {bvar}(N)")
+                else:
+                    decls.append(f"      {ptype} :: {bvar}(N,N)")
                 ds = "A" if arr_idx == 0 else "B"
                 file_opens.append(
                     f"      OPEN({file_n}, FILE='dataset_{fn_lo}_{ds}.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')\n"
@@ -594,24 +737,37 @@ def _make_generic_driver(fn_name: str, N: int,
       IMPLICIT NONE
       INTEGER, PARAMETER :: N = {N}
 {result_decl}{func_decl}{decl_block}
-      INTEGER :: ITER, COUNT_RATE, T1, T2
-      DOUBLE PRECISION :: ELAPSED
+            DOUBLE PRECISION :: ELAPSED, T1, T2
 
 {file_open_block}
 {init_block}
 
-      CALL SYSTEM_CLOCK(COUNT_RATE=COUNT_RATE)
-      CALL SYSTEM_CLOCK(T1)
-      DO ITER = 1, 10
-        {call_stmt}
-      END DO
-      CALL SYSTEM_CLOCK(T2)
-      ELAPSED = DBLE(T2-T1) / DBLE(COUNT_RATE) * 1000.0D0 / 10.0D0
+            CALL CPU_TIME(T1)
+            {call_stmt}
+            CALL CPU_TIME(T2)
+            ELAPSED = (T2-T1) * 1000.0D0
 
 {output_block}
-      WRITE(*,'(A,F12.4)') 'FORTRAN_TIME_MS=', ELAPSED
+    WRITE(*,'(A,F16.8)') 'FORTRAN_TIME_MS=', ELAPSED
       END PROGRAM
 """
+
+
+def _make_generic_precision_driver(fn_name: str, N: int,
+                                   sig: dict | None, prec: _Precision) -> str:
+    """
+    Generate a near-cancellation precision Fortran benchmark driver for a
+    non-specialized entry point by adapting the generic driver template to
+    read precision datasets and emit a precision output artifact.
+    """
+    fn_up = fn_name.upper()
+    fn_lo = fn_name.lower()
+    src = _make_generic_driver(fn_name, N, sig, prec)
+    src = src.replace(f"PROGRAM BENCH_{fn_up}", f"PROGRAM BENCH_{fn_up}_PREC", 1)
+    src = src.replace(f"dataset_{fn_lo}_A.bin", f"dataset_{fn_lo}_precision_A.bin")
+    src = src.replace(f"dataset_{fn_lo}_B.bin", f"dataset_{fn_lo}_precision_B.bin")
+    src = src.replace(f"bench_{fn_lo}_output.bin", f"bench_{fn_lo}_precision_output.bin")
+    return src
 
 
 def _make_c_blas_driver(fn_name: str, N: int, prec: _Precision) -> str:
@@ -1191,6 +1347,8 @@ def _make_c_generic_driver(fn_name: str, N: int,
     fn_lo  = fn_name.lower()
     fn_ext = fn_lo + "_"
     ct     = prec.c_type
+    vector_mode = _is_vector_blas(fn_name)
+    array_count_expr = "BENCH_N" if vector_mode else "(size_t)BENCH_N * BENCH_N"
 
     # Build typed variable declarations and the function call from the signature
     if sig is not None:
@@ -1229,10 +1387,13 @@ def _make_c_generic_driver(fn_name: str, N: int,
                 pctype = p_prec.c_type
                 if p["is_array"]:
                     ds = "A" if arr_idx == 0 else "B"
-                    decls.append(f"    static {pctype} {cname}[BENCH_N * BENCH_N];")
+                    if vector_mode:
+                        decls.append(f"    static {pctype} {cname}[BENCH_N];")
+                    else:
+                        decls.append(f"    static {pctype} {cname}[BENCH_N * BENCH_N];")
                     reads.append(
                         f'    read_bin("dataset_{fn_lo}_{ds}.bin",'
-                        f" {cname}, (size_t)BENCH_N * BENCH_N);"
+                        f" {cname}, {array_count_expr});"
                     )
                     arr_idx += 1
                     call_args.append(cname)
@@ -1262,7 +1423,7 @@ def _make_c_generic_driver(fn_name: str, N: int,
         if float_arrays:
             out_arr_expr = f"bench_{float_arrays[-1]}"
             out_ctype = ct
-            out_count = "(size_t)BENCH_N * BENCH_N"
+            out_count = array_count_expr
         elif scalar_outputs:
             out_arr_expr = f"&{scalar_outputs[-1][0]}"
             out_ctype = scalar_outputs[-1][1]
@@ -1283,13 +1444,13 @@ def _make_c_generic_driver(fn_name: str, N: int,
         )
         init_block  = ""
         read_block  = (
-            f'    read_bin("dataset_{fn_lo}_A.bin", bench_A, (size_t)BENCH_N * BENCH_N);\n'
-            f'    read_bin("dataset_{fn_lo}_B.bin", bench_B, (size_t)BENCH_N * BENCH_N);'
+            f'    read_bin("dataset_{fn_lo}_A.bin", bench_A, {array_count_expr});\n'
+            f'    read_bin("dataset_{fn_lo}_B.bin", bench_B, {array_count_expr});'
         )
         call_line   = f"    /* TODO: {fn_ext}(...); */"
         out_arr_expr = "bench_C"
         out_ctype   = ct
-        out_count   = "(size_t)BENCH_N * BENCH_N"
+        out_count   = array_count_expr
 
     return f"""\
 /* C benchmark driver for {fn_name} — generated by Fortran2Rust */
@@ -1342,9 +1503,8 @@ def generate_benchmarks(
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
-    N = N_DEFAULT
     log = make_stage_logger(output_dir)
-    log.info(f"generate_benchmarks: entry_points={entry_points}, N={N}")
+    log.info(f"generate_benchmarks: entry_points={entry_points}, N_default={N_DEFAULT}")
 
     # ── Phase 1: datasets (always first, unconditionally) ────────────────────
     # Datasets are the shared ground truth for Fortran, C, and Rust.
@@ -1357,6 +1517,7 @@ def generate_benchmarks(
     # both dataset generation and driver generation use consistent types.
     ep_prec: dict[str, _Precision] = {}
     ep_sig:  dict[str, dict | None] = {}
+    ep_n:    dict[str, int] = {}
     for ep in entry_points:
         ep_upper = ep.upper()
         if ep_upper in KNOWN_BLAS:
@@ -1374,15 +1535,51 @@ def generate_benchmarks(
         ep_prec[ep] = prec
         ep_sig[ep]  = sig
 
+    # Calibrate all entry points in parallel — each uses its own file paths so
+    # there are no write conflicts.  Python's logging module is thread-safe.
+    # status_fn updates are serialised through a lock to avoid interleaved text.
+    _status_lock = threading.Lock()
+
+    def _safe_status(msg: str) -> None:
+        if status_fn:
+            with _status_lock:
+                status_fn(msg)
+
+    max_workers = min(len(entry_points), os.cpu_count() or 4)
+    if status_fn:
+        status_fn(f"Calibrating benchmark sizes for {len(entry_points)} function(s) "
+                  f"(up to {max_workers} parallel workers)…")
+
+    def _calibrate_one(ep: str) -> tuple[str, int]:
+        n = _calibrate_benchmark_size(
+            fn_name=ep,
+            source_dir=source_dir,
+            dep_files=dep_files,
+            output_dir=output_dir,
+            call_graph=call_graph,
+            sig=ep_sig[ep],
+            prec=ep_prec[ep],
+            log=log,
+            status_fn=_safe_status,
+        )
+        log.info(f"  Selected benchmark size for {ep}: N={n}")
+        return ep, n
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_calibrate_one, ep): ep for ep in entry_points}
+        for fut in as_completed(futures):
+            ep, n = fut.result()   # re-raises any exception from the worker
+            ep_n[ep] = n
+
     all_datasets: dict[str, dict] = {}
     for ep in entry_points:
         prec = ep_prec[ep]
+        N = ep_n[ep]
         dataset = generate_dataset(ep, N, output_dir, prec=prec)
         all_datasets[ep] = {k: str(v) for k, v in dataset.items()}
-        log.info(f"  dataset for {ep} ({prec.numpy_dtype}): {list(dataset.keys())}")
-        if ep.upper() in KNOWN_BLAS:
-            prec_dataset = generate_precision_dataset(ep, N, output_dir, prec=prec)
-            all_datasets[ep + "_precision"] = {k: str(v) for k, v in prec_dataset.items()}
+        log.info(f"  dataset for {ep} ({prec.numpy_dtype}, N={N}): {list(dataset.keys())}")
+        prec_dataset = generate_precision_dataset(ep, N, output_dir, prec=prec)
+        all_datasets[ep + "_precision"] = {k: str(v) for k, v in prec_dataset.items()}
     (output_dir / "datasets.json").write_text(json.dumps(all_datasets, indent=2))
 
     # ── Phase 2: benchmark drivers (Fortran + C + Rust) ──────────────────────
@@ -1394,6 +1591,7 @@ def generate_benchmarks(
     for ep in entry_points:
         ep_upper = ep.upper()
         ep_lower = ep.lower()
+        N = ep_n[ep]
         prec = ep_prec[ep]
         sig  = ep_sig[ep]
         dataset_paths = {k: Path(v) for k, v in all_datasets[ep].items()}
@@ -1415,9 +1613,15 @@ def generate_benchmarks(
             precision_ext = ".f90"
         else:
             driver_src      = _make_generic_driver(ep, N, sig, prec)
-            precision_src   = None
+            precision_src   = _make_generic_precision_driver(ep, N, sig, prec)
             c_driver_src    = _make_c_generic_driver(ep, N, sig, prec)
-            c_precision_src = None
+            c_precision_src = _make_c_generic_driver(ep, N, sig, prec).replace(
+                f"dataset_{ep_lower}_A.bin", f"dataset_{ep_lower}_precision_A.bin"
+            ).replace(
+                f"dataset_{ep_lower}_B.bin", f"dataset_{ep_lower}_precision_B.bin"
+            ).replace(
+                f"bench_{ep_lower}_output.bin", f"bench_{ep_lower}_precision_output.bin"
+            )
 
         driver_file = output_dir / f"bench_{ep_lower}{driver_ext}"
         driver_file.write_text(driver_src)
@@ -1464,19 +1668,8 @@ def generate_benchmarks(
             bench_rs_files.append(str(rs_prec_file))
             log.info(f"  Wrote Rust precision bench driver: {rs_prec_file.name}")
 
-        # Compile and run Fortran benchmark to produce the reference output
-        # Use absolute paths — relative paths fail when gfortran is not run from the repo root.
-        fortran_dep_paths: list[Path] = [Path(f).resolve() for f in dep_files if Path(f).exists()]
-        ep_upper = ep.upper()
-        extra_symbols = set((call_graph or {}).get(ep_upper, []))
-        extra_symbols.add(ep_upper)
-        for sym in extra_symbols:
-            sym_lower = sym.lower()
-            for ext in (".f", ".f90"):
-                candidate = source_dir / f"{sym_lower}{ext}"
-                if candidate.exists():
-                    fortran_dep_paths.append(candidate.resolve())
-        fortran_deps = [str(p) for p in sorted(set(fortran_dep_paths))]
+        # Compile and run Fortran benchmark to produce the reference output.
+        fortran_deps = _resolve_fortran_deps(source_dir, dep_files, call_graph, ep_upper)
         exe_path = (output_dir / f"bench_{ep_lower}").resolve()
         compile_cmd = (
             [
@@ -1490,6 +1683,7 @@ def generate_benchmarks(
 
         bench_info: dict = {
             "driver_file": str(driver_file),
+            "n": N,
             "dataset": {k: str(v) for k, v in dataset_paths.items()},
             "compile_cmd": compile_cmd,
             "compile_ok": False,
@@ -1585,55 +1779,54 @@ def generate_benchmarks(
 
         benchmarks[ep] = bench_info
 
-        # Compile and run precision Fortran driver (BLAS functions only).
+        # Compile and run precision Fortran driver for every entry point when present.
         # Produces bench_{ep_lower}_precision_output.bin used as baseline in Stage 4.
-        if ep_upper in KNOWN_BLAS:
-            prec_driver_file = output_dir / f"bench_{ep_lower}_precision.f"
-            if not prec_driver_file.exists():
-                prec_driver_file = output_dir / f"bench_{ep_lower}_precision.f90"
-            if prec_driver_file.exists():
-                prec_exe = (output_dir / f"bench_{ep_lower}_precision").resolve()
-                prec_compile_cmd = (
-                    [
-                        "gfortran", "-O2",
-                        "-ffunction-sections", "-fdata-sections",
-                        str(prec_driver_file.resolve()),
-                    ]
-                    + fortran_deps
-                    + ["-Wl,--gc-sections", "-Wl,--allow-multiple-definition", "-lm", "-o", str(prec_exe)]
+        prec_driver_file = output_dir / f"bench_{ep_lower}_precision.f"
+        if not prec_driver_file.exists():
+            prec_driver_file = output_dir / f"bench_{ep_lower}_precision.f90"
+        if prec_driver_file.exists():
+            prec_exe = (output_dir / f"bench_{ep_lower}_precision").resolve()
+            prec_compile_cmd = (
+                [
+                    "gfortran", "-O2",
+                    "-ffunction-sections", "-fdata-sections",
+                    str(prec_driver_file.resolve()),
+                ]
+                + fortran_deps
+                + ["-Wl,--gc-sections", "-Wl,--allow-multiple-definition", "-lm", "-o", str(prec_exe)]
+            )
+            prec_log = output_dir / f"gfortran_{ep_lower}_precision.log"
+            try:
+                if status_fn:
+                    status_fn(f"Compiling Fortran precision benchmark for {ep}…")
+                log.info(f"Compiling Fortran precision benchmark for {ep}")
+                prec_result = subprocess.run(
+                    prec_compile_cmd, capture_output=True, text=True, timeout=120,
                 )
-                prec_log = output_dir / f"gfortran_{ep_lower}_precision.log"
-                try:
-                    if status_fn:
-                        status_fn(f"Compiling Fortran precision benchmark for {ep}…")
-                    log.info(f"Compiling Fortran precision benchmark for {ep}")
-                    prec_result = subprocess.run(
-                        prec_compile_cmd, capture_output=True, text=True, timeout=120,
+                prec_log.write_text(
+                    f"=== COMMAND ===\n{' '.join(prec_compile_cmd)}\n\n"
+                    f"=== STDOUT ===\n{prec_result.stdout}\n"
+                    f"=== STDERR ===\n{prec_result.stderr}\n"
+                    f"=== EXIT CODE: {prec_result.returncode} ===\n"
+                )
+                if prec_result.returncode == 0:
+                    log.info(f"  gfortran precision OK for {ep}")
+                    prec_run = subprocess.run(
+                        [str(prec_exe)], capture_output=True, text=True,
+                        cwd=str(output_dir.resolve()), timeout=300,
                     )
-                    prec_log.write_text(
-                        f"=== COMMAND ===\n{' '.join(prec_compile_cmd)}\n\n"
-                        f"=== STDOUT ===\n{prec_result.stdout}\n"
-                        f"=== STDERR ===\n{prec_result.stderr}\n"
-                        f"=== EXIT CODE: {prec_result.returncode} ===\n"
-                    )
-                    if prec_result.returncode == 0:
-                        log.info(f"  gfortran precision OK for {ep}")
-                        prec_run = subprocess.run(
-                            [str(prec_exe)], capture_output=True, text=True,
-                            cwd=str(output_dir.resolve()), timeout=300,
+                    with open(prec_log, "a") as fh:
+                        fh.write(
+                            f"\n=== RUN STDOUT ===\n{prec_run.stdout}\n"
+                            f"=== RUN STDERR ===\n{prec_run.stderr}\n"
+                            f"=== RUN EXIT CODE: {prec_run.returncode} ===\n"
                         )
-                        with open(prec_log, "a") as fh:
-                            fh.write(
-                                f"\n=== RUN STDOUT ===\n{prec_run.stdout}\n"
-                                f"=== RUN STDERR ===\n{prec_run.stderr}\n"
-                                f"=== RUN EXIT CODE: {prec_run.returncode} ===\n"
-                            )
-                        log.info(f"  Fortran precision run exit {prec_run.returncode}")
-                    else:
-                        log.warning(f"  gfortran precision FAILED for {ep}: {prec_result.stderr[:300]}")
-                except Exception as e:
-                    prec_log.write_text(f"Exception: {e}\n")
-                    log.warning(f"  Fortran precision exception for {ep}: {e}")
+                    log.info(f"  Fortran precision run exit {prec_run.returncode}")
+                else:
+                    log.warning(f"  gfortran precision FAILED for {ep}: {prec_result.stderr[:300]}")
+            except Exception as e:
+                prec_log.write_text(f"Exception: {e}\n")
+                log.warning(f"  Fortran precision exception for {ep}: {e}")
 
     result_data = {
         "benchmarks": benchmarks,
