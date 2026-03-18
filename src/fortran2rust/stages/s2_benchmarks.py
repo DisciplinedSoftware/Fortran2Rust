@@ -271,7 +271,8 @@ def _calibrate_benchmark_size(
     fn_upper = fn_name.upper()
     fn_lower = fn_name.lower()
     n = N_DEFAULT
-    n_max = min(VECTOR_N_MAX, vector_n_max) if _is_vector_blas(fn_name) else min(N_MAX, matrix_n_max)
+    is_vector = _is_vector_blas(fn_name)
+    n_max = min(VECTOR_N_MAX, vector_n_max) if is_vector else min(N_MAX, matrix_n_max)
     max_steps = VECTOR_CALIBRATION_STEPS if _is_vector_blas(fn_name) else MAX_CALIBRATION_STEPS
     fortran_deps = _resolve_fortran_deps(source_dir, dep_files, call_graph, fn_upper)
 
@@ -323,6 +324,23 @@ def _calibrate_benchmark_size(
             if TARGET_TIME_MS_MIN <= elapsed_ms <= TARGET_TIME_MS_MAX:
                 return n, 1
             if elapsed_ms < TARGET_TIME_MS_MIN:
+                # Vector kernels (e.g., DASUM/DNRM2) are often sub-ms even at large N.
+                # Prefer repeated timing runs over growing N to huge values, which can
+                # dramatically increase compile/runtime memory pressure.
+                if is_vector:
+                    est_runs = int((TARGET_TIME_MS_MIN + max(elapsed_ms, 1e-6) - 1e-9) / max(elapsed_ms, 1e-6))
+                    if timing_max_runs == 0:
+                        timing_runs = max(1, est_runs)
+                    else:
+                        timing_runs = max(1, min(timing_max_runs, est_runs))
+                    log.info(
+                        "  Vector calibration %s: N=%s too fast (%.4fms); using %s timing run(s) instead of larger N",
+                        fn_name,
+                        n,
+                        elapsed_ms,
+                        timing_runs,
+                    )
+                    return n, timing_runs
                 if n >= n_max:
                     est_runs = int((TARGET_TIME_MS_MIN + max(elapsed_ms, 1e-6) - 1e-9) / max(elapsed_ms, 1e-6))
                     if timing_max_runs == 0:
