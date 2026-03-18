@@ -197,6 +197,15 @@ def _dominant_precision(sig: dict | None) -> _Precision:
             return prec
     return _PREC_D
 
+
+def _has_numeric_array_params(sig: dict | None) -> bool:
+    if sig is None:
+        return False
+    for p in sig.get("params", []):
+        if p.get("is_array") and p.get("type") in _FORTRAN_TYPE_TO_PREC:
+            return True
+    return False
+
 KNOWN_BLAS = {
     "DGEMM", "SGEMM", "ZGEMM", "CGEMM",
     "DGEMV", "SGEMV", "ZGEMV", "CGEMV",
@@ -272,6 +281,7 @@ def _calibrate_benchmark_size(
     fn_lower = fn_name.lower()
     n = N_DEFAULT
     is_vector = _is_vector_blas(fn_name)
+    is_size_sensitive = bool(is_vector or fn_upper in KNOWN_GEMM or _has_numeric_array_params(sig))
     n_max = min(VECTOR_N_MAX, vector_n_max) if is_vector else min(N_MAX, matrix_n_max)
     max_steps = VECTOR_CALIBRATION_STEPS if _is_vector_blas(fn_name) else MAX_CALIBRATION_STEPS
     fortran_deps = _resolve_fortran_deps(source_dir, dep_files, call_graph, fn_upper)
@@ -324,6 +334,13 @@ def _calibrate_benchmark_size(
             if TARGET_TIME_MS_MIN <= elapsed_ms <= TARGET_TIME_MS_MAX:
                 return n, 1
             if elapsed_ms < TARGET_TIME_MS_MIN:
+                if not is_size_sensitive:
+                    log.info(
+                        "  Calibration %s: scalar/non-size-sensitive function (%.4fms); using single timing run",
+                        fn_name,
+                        elapsed_ms,
+                    )
+                    return n, 1
                 # Vector kernels (e.g., DASUM/DNRM2) are often sub-ms even at large N.
                 # Prefer repeated timing runs over growing N to huge values, which can
                 # dramatically increase compile/runtime memory pressure.
