@@ -72,3 +72,53 @@ def test_stage4_persists_failure_artifacts_when_preconversion_fails(tmp_path) ->
     assert result["compile_commands"] == ""
     assert (out_dir / "llm_log.json").exists()
     assert (out_dir / "llm_conversations.json").exists()
+
+
+class _NoopLLM:
+    def pop_conversation_log(self) -> list[dict]:
+        return []
+
+
+def test_stage4_compile_fix_status_reports_batch_files_once(tmp_path, monkeypatch) -> None:
+    c_dir = tmp_path / "s3"
+    out_dir = tmp_path / "s4"
+    baseline_dir = tmp_path / "s2"
+    c_dir.mkdir()
+    baseline_dir.mkdir()
+
+    (c_dir / "f2c.h").write_text("typedef int integer; typedef int ftnlen;\n")
+    (c_dir / "a.c").write_text("int a_(void) { return 0; }\n")
+    (c_dir / "b.c").write_text("int b_(void) { return 0; }\n")
+
+    compile_outputs = [
+        (False, "a.c:1:1: error: bad\nb.c:2:1: error: bad"),
+        (True, ""),
+    ]
+
+    def _fake_compile_c(_c_dir):
+        return compile_outputs.pop(0)
+
+    def _fake_repair_file(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(s4_llm_fix_c, "_compile_c", _fake_compile_c)
+    monkeypatch.setattr(s4_llm_fix_c, "_repair_file", _fake_repair_file)
+
+    statuses: list[str] = []
+
+    result = s4_llm_fix_c.fix_c_code(
+        c_dir,
+        out_dir,
+        _NoopLLM(),
+        max_retries=3,
+        baseline_dir=baseline_dir,
+        status_fn=statuses.append,
+    )
+
+    assert result["compile_ok"] is True
+    assert any(
+        s == "LLM: fixing 2 file(s) (a.c, b.c) (attempt 1/3)…"
+        for s in statuses
+    )
+    assert not any("LLM: fixing a.c (attempt 1/3)" in s for s in statuses)
+    assert not any("LLM: fixing b.c (attempt 1/3)" in s for s in statuses)

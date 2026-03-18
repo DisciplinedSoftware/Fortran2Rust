@@ -1069,6 +1069,13 @@ def fix_c_code(
                 f"[bold]{', '.join(f.name for f in failing_files)}[/bold]: "
                 f"[dim]{_first_error_line(compile_output)}[/dim]"
             )
+            if status_fn:
+                status_fn(
+                    "LLM: fixing "
+                    f"{len(failing_files)} file(s) "
+                    f"({', '.join(f.name for f in failing_files)}) "
+                    f"(attempt {attempt+1}/{max_retries})…"
+                )
 
             # Fix all currently-failing files in parallel, then recompile once.
             def _fix_one(target: Path) -> bool:
@@ -1077,8 +1084,6 @@ def fix_c_code(
                     "target_file": target.name,
                     "error": compile_output,
                 })
-                if status_fn:
-                    status_fn(f"LLM: fixing {target.name} (attempt {attempt+1}/{max_retries})…")
                 log.info(f"LLM repair attempt {attempt+1}/{max_retries} for {target.name}")
 
                 fortran_src = _find_fortran_source_for_function(c_dir, target.stem)

@@ -24,8 +24,8 @@ N_MAX = 2000
 TARGET_TIME_MS_MIN = 1.0
 TARGET_TIME_MS_MAX = 100.0
 MAX_CALIBRATION_STEPS = 6
-VECTOR_N_MAX = 32_000
-VECTOR_CALIBRATION_STEPS = 7
+VECTOR_N_MAX = 2_048_000
+VECTOR_CALIBRATION_STEPS = 13
 
 
 # ── Precision type system ──────────────────────────────────────────────────────
@@ -212,6 +212,7 @@ KNOWN_GEMM = {"DGEMM", "SGEMM", "ZGEMM", "CGEMM"}
 KNOWN_VECTOR_BLAS = {
     "DASUM", "SASUM", "DNRM2", "SNRM2", "DDOT", "SDOT",
     "IDAMAX", "ISAMAX", "DAXPY", "SAXPY", "DCOPY", "SCOPY", "DSCAL", "SSCAL",
+    "DB1NRM2",
 }
 
 
