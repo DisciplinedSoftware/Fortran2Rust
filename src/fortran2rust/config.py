@@ -51,7 +51,7 @@ def load_config(**overrides) -> Config:
         max_retries=int(os.getenv("MAX_RETRIES", "5")),
         s2_max_parallel=max(1, int(os.getenv("S2_MAX_PARALLEL", "2"))),
         s2_matrix_n_max=max(64, int(os.getenv("S2_MATRIX_N_MAX", "768"))),
-        s2_timing_max_runs=max(1, int(os.getenv("S2_TIMING_MAX_RUNS", "12"))),
+        s2_timing_max_runs=max(0, int(os.getenv("S2_TIMING_MAX_RUNS", "12"))),
         s2_dataset_reuse_every=max(1, int(os.getenv("S2_DATASET_REUSE_EVERY", "3"))),
         output_dir=Path(os.getenv("OUTPUT_DIR", "./artifacts")),
         stages=list(range(1, 10)),

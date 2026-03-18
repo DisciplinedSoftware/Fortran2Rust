@@ -324,7 +324,10 @@ def _calibrate_benchmark_size(
             if elapsed_ms < TARGET_TIME_MS_MIN:
                 if n >= n_max:
                     est_runs = int((TARGET_TIME_MS_MIN + max(elapsed_ms, 1e-6) - 1e-9) / max(elapsed_ms, 1e-6))
-                    timing_runs = max(1, min(timing_max_runs, est_runs))
+                    if timing_max_runs == 0:
+                        timing_runs = max(1, est_runs)
+                    else:
+                        timing_runs = max(1, min(timing_max_runs, est_runs))
                     log.info(
                         "  Calibration %s: N=%s below %.1fms; using %s timing run(s)",
                         fn_name,
