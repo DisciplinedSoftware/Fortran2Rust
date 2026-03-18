@@ -14,12 +14,12 @@ def main():
     parser.add_argument(
         "-i", "--non-interactive",
         action="store_true",
-        help="Skip menus and run from CLI args; defaults to BLAS + dgemm when omitted",
+        help="Skip menus and run from CLI args",
     )
     parser.add_argument(
         "--library",
         metavar="PATH|blas",
-        help="Path to Fortran library directory, or 'blas' to auto-download BLAS",
+        help="Path to Fortran library directory, or 'blas' to auto-download BLAS demo source",
     )
     parser.add_argument(
         "--entry-points",
@@ -72,18 +72,21 @@ def _run_non_interactive(args):
 
     from .blas import get_blas_source
     from .pipeline import run_pipeline
+    from .stages.s1_analyze import list_entry_points
 
     console = Console()
     console.print("[bold blue]Fortran2Rust[/bold blue] — non-interactive mode")
 
-    if args.library and args.library != "blas":
+    if args.library == "blas":
+        library_path = get_blas_source(console)
+    elif args.library:
         library_path = Path(args.library).expanduser().resolve()
     else:
+        console.print("[dim]No --library provided; defaulting to BLAS demo source[/dim]")
         library_path = get_blas_source(console)
 
     if args.entry_points:
         if args.entry_points == "all":
-            from .stages.s1_analyze import list_entry_points
             entry_points = list_entry_points(library_path)
         else:
             entry_points = [e.strip() for e in args.entry_points.split(",") if e.strip()]

@@ -14,7 +14,8 @@ pip install -e '.[dev]'
 **Run the pipeline:**
 ```bash
 fortran2rust                    # interactive menu
-fortran2rust --non-interactive  # demo: converts dgemm from BLAS
+fortran2rust --non-interactive --library /path/to/fortran --entry-points all
+fortran2rust --non-interactive --library blas --entry-points dgemm
 fortran2rust --stages 4,6 --library /path/to/fortran --entry-points dgemm
 ```
 
@@ -104,5 +105,5 @@ Compilation output is kept as dedicated log files (full stdout+stderr, untruncat
 3. Add the dispatch branch in the `if/elif` chain in `run_pipeline()`.
 4. Update `Config.stages` default range if the new stage should run by default.
 
-### BLAS-specific handling
-`s2_benchmarks.py` has a `KNOWN_BLAS` set of function names. Functions in this set get DGEMM-style benchmark drivers (reads `dataset_*_A.bin`, `dataset_*_params.bin`). Unknown functions get generic stub drivers that the LLM fills in. BLAS-known functions also get a near-cancellation precision driver (seed 43) in addition to the main benchmark (seed 42).
+### Stage-2 benchmark generation
+`s2_benchmarks.py` is signature-driven. It parses callable signatures from source and generates typed benchmark drivers and shared datasets without name-based kernel allowlists. Precision datasets use fixed seed 43 in addition to the main benchmark seed 42.

@@ -128,7 +128,7 @@ def test_stage2_generates_precision_for_generic_entrypoint(monkeypatch, tmp_path
     assert "fwrite(&bench_result, sizeof(doublereal), 1, out);" in c_driver_text
 
 
-def test_stage2_daxpy_c_driver_writes_single_call_baseline(monkeypatch, tmp_path: Path) -> None:
+def test_stage2_c_driver_is_generic_without_specialized_kernel_paths(monkeypatch, tmp_path: Path) -> None:
     source_dir = tmp_path / "src"
     output_dir = tmp_path / "out"
     source_dir.mkdir()
@@ -167,9 +167,10 @@ def test_stage2_daxpy_c_driver_writes_single_call_baseline(monkeypatch, tmp_path
     )
 
     c_driver_text = (output_dir / "bench_daxpy.c").read_text()
-    assert "static doublereal bench_Y0[BENCH_N];" in c_driver_text
-    assert "memcpy(bench_Y, bench_Y0, sizeof(bench_Y));" in c_driver_text
-    assert c_driver_text.count("daxpy_(&n, &alpha, bench_X, &incx, bench_Y, &incy);") == 2
+    assert "/* TODO: verify function signature and call against the f2c output */" in c_driver_text
+    assert 'read_bin("dataset_daxpy_A.bin"' in c_driver_text
+    assert 'read_bin("dataset_daxpy_B.bin"' in c_driver_text
+    assert "memcpy(" not in c_driver_text
 
 
 def test_stage2_dbeg_c_driver_declares_logical_param(monkeypatch, tmp_path: Path) -> None:

@@ -30,6 +30,7 @@ class Config:
     s2_matrix_n_max: int = 512
     s2_vector_n_max: int = 262144
     s2_timing_max_runs: int = 12
+    s2_timing_damping: float = 0.75
     s2_dataset_reuse_every: int = 3
     output_dir: Path = field(default_factory=lambda: Path("./artifacts"))
     stages: list[int] = field(default_factory=lambda: list(range(1, 10)))
@@ -54,6 +55,7 @@ def load_config(**overrides) -> Config:
         s2_matrix_n_max=max(64, int(os.getenv("S2_MATRIX_N_MAX", "512"))),
         s2_vector_n_max=max(1024, int(os.getenv("S2_VECTOR_N_MAX", "262144"))),
         s2_timing_max_runs=max(0, int(os.getenv("S2_TIMING_MAX_RUNS", "12"))),
+        s2_timing_damping=min(1.0, max(0.0, float(os.getenv("S2_TIMING_DAMPING", "0.75")))),
         s2_dataset_reuse_every=max(1, int(os.getenv("S2_DATASET_REUSE_EVERY", "3"))),
         output_dir=Path(os.getenv("OUTPUT_DIR", "./artifacts")),
         stages=list(range(1, 10)),

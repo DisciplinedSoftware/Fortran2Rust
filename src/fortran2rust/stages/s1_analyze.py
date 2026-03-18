@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -9,6 +10,16 @@ from pathlib import Path
 from ._log import make_stage_logger
 
 logger = logging.getLogger(__name__)
+
+
+def _stage1_max_workers() -> int:
+    raw = os.getenv("S1_MAX_PARALLEL", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return max(1, min(4, os.cpu_count() or 1))
 
 
 # ---------------------------------------------------------------------------
@@ -80,11 +91,12 @@ def list_entry_points(source_dir: Path, status_fn=None) -> list[str]:
     if not all_files:
         return []
 
+    max_workers = _stage1_max_workers()
     if status_fn:
-        status_fn(f"Parsing {len(all_files)} Fortran file(s) (parallel)…")
+        status_fn(f"Parsing {len(all_files)} Fortran file(s) (parallel={max_workers})…")
 
     names: list[str] = []
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         for _path, name_entries, _edges in executor.map(
             _parse_and_extract, [str(f) for f in all_files]
         ):
@@ -99,16 +111,25 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
 
     all_files = sorted(f for f in source_dir.glob("*.f") if not f.name.startswith("."))
 
+    if not all_files:
+        msg = (
+            f"No Fortran source files (*.f) found in {source_dir}. "
+            "Provide a valid --library path or use --library blas for the demo source."
+        )
+        log.error(msg)
+        raise RuntimeError(msg)
+
+    max_workers = _stage1_max_workers()
     if status_fn:
-        status_fn(f"Parsing {len(all_files)} Fortran file(s) (parallel)…")
-    log.info(f"Parsing {len(all_files)} Fortran source files in parallel")
+        status_fn(f"Parsing {len(all_files)} Fortran file(s) (parallel={max_workers})…")
+    log.info(f"Parsing {len(all_files)} Fortran source files in parallel (workers={max_workers})")
 
     # Map: function_name (upper) -> source file path
     name_to_file: dict[str, Path] = {}
     # Map: function_name (upper) -> set of called function names (upper)
     call_graph: dict[str, set[str]] = {}
 
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         for path_str, name_entries, call_edges in executor.map(
             _parse_and_extract, [str(f) for f in all_files]
         ):
@@ -125,8 +146,18 @@ def analyze_dependencies(source_dir: Path, entry_points: list[str], output_dir: 
 
     log.info(f"Parsed {len(all_files)} files; found {len(name_to_file)} definitions")
 
-    # BFS from entry points to find all reachable functions/files
     ep_upper = [ep.upper() for ep in entry_points]
+    unresolved = sorted({fn for fn in ep_upper if fn not in name_to_file})
+    if unresolved:
+        msg = (
+            "Entry point(s) not found in source files: "
+            f"{', '.join(unresolved)}. "
+            "Use --entry-points all to discover available functions."
+        )
+        log.error(msg)
+        raise RuntimeError(msg)
+
+    # BFS from entry points to find all reachable functions/files
     visited: set[str] = set()
     queue = list(ep_upper)
     while queue:

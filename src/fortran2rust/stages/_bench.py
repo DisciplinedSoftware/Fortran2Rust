@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import shutil
 import subprocess
@@ -9,8 +10,6 @@ from pathlib import Path
 import numpy as np
 from rich.console import Console
 
-from .s2_benchmarks import _blas_precision
-
 _console = Console(stderr=True)
 
 _NUMERIC_ATOL = 1e-10
@@ -18,6 +17,23 @@ _NUMERIC_RTOL = 1e-10
 
 # Must match the package name in the Cargo.toml template (s5_c2rust.py)
 _CRATE_NAME = "fortran2rust_output"
+
+
+def _load_baseline_dtypes(baseline_dir: Path) -> dict[str, str]:
+    """Load per-entry-point numpy dtypes from stage-2 benchmarks.json metadata."""
+    path = baseline_dir / "benchmarks.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    dtypes: dict[str, str] = {}
+    for fn_name, info in data.get("benchmarks", {}).items():
+        dtype = info.get("numpy_dtype")
+        if isinstance(dtype, str) and dtype:
+            dtypes[fn_name.lower()] = dtype
+    return dtypes
 
 
 def _get_failing_rust_files(error: str, workspace_dir: Path) -> list[Path]:
@@ -279,6 +295,8 @@ def run_rust_benchmarks(
         if not dest.exists():
             shutil.copy(ds, dest)
 
+    baseline_dtypes = _load_baseline_dtypes(baseline_dir)
+
     results: dict[str, dict] = {}
     for bench_rs in bench_rs_files:
         stem = bench_rs.stem  # e.g. bench_dgemm
@@ -327,7 +345,7 @@ def run_rust_benchmarks(
 
             rust_out = output_dir / f"bench_{fn_name}_output.bin"
             if rust_out.exists():
-                dtype = np.dtype(_blas_precision(fn_name).numpy_dtype)
+                dtype = np.dtype(baseline_dtypes.get(fn_name.lower(), "float64"))
                 r_data = np.fromfile(str(rust_out), dtype=dtype)
                 f_data = np.fromfile(str(fortran_bin), dtype=dtype)
                 if r_data.shape == f_data.shape:

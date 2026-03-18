@@ -280,6 +280,7 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                         matrix_n_max=config.s2_matrix_n_max,
                         vector_n_max=config.s2_vector_n_max,
                         timing_max_runs=config.s2_timing_max_runs,
+                        timing_damping=config.s2_timing_damping,
                         dataset_reuse_every=config.s2_dataset_reuse_every,
                         status_fn=status_fn,
                     )
@@ -432,6 +433,13 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
             except Exception as e:
                 console.print(f"  [red]✗ Stage {stage_num} failed: {e}[/red]")
                 results[stage_num] = {"error": str(e)}
+                if stage_num == 1:
+                    console.print(
+                        "  [bold red]Aborting pipeline:[/bold red] "
+                        "Stage 1 dependency analysis failed."
+                    )
+                    aborted_reason = "Stage 1 dependency analysis failed"
+                    break
                 if stage_num == 2:
                     console.print(
                         "  [bold red]Aborting pipeline:[/bold red] "
