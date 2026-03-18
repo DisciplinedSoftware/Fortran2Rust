@@ -26,6 +26,10 @@ class Config:
     github_token: str = ""
     ollama_base_url: str = "http://localhost:11434"
     max_retries: int = 5
+    s2_max_parallel: int = 2
+    s2_matrix_n_max: int = 768
+    s2_timing_max_runs: int = 12
+    s2_dataset_reuse_every: int = 3
     output_dir: Path = field(default_factory=lambda: Path("./artifacts"))
     stages: list[int] = field(default_factory=lambda: list(range(1, 10)))
 
@@ -45,6 +49,10 @@ def load_config(**overrides) -> Config:
         github_token=os.getenv("GITHUB_TOKEN", "") or generic_api_key,
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         max_retries=int(os.getenv("MAX_RETRIES", "5")),
+        s2_max_parallel=max(1, int(os.getenv("S2_MAX_PARALLEL", "2"))),
+        s2_matrix_n_max=max(64, int(os.getenv("S2_MATRIX_N_MAX", "768"))),
+        s2_timing_max_runs=max(1, int(os.getenv("S2_TIMING_MAX_RUNS", "12"))),
+        s2_dataset_reuse_every=max(1, int(os.getenv("S2_DATASET_REUSE_EVERY", "3"))),
         output_dir=Path(os.getenv("OUTPUT_DIR", "./artifacts")),
         stages=list(range(1, 10)),
     )

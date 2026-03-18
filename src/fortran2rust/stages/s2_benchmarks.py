@@ -258,8 +258,11 @@ def _calibrate_benchmark_size(
     sig: dict | None,
     prec: _Precision,
     log,
+    matrix_n_max: int,
+    timing_max_runs: int,
+    dataset_reuse_every: int,
     status_fn=None,
-) -> int:
+) -> tuple[int, int]:
     """
     Choose a dataset size N for benchmarking by iterating until measured runtime
     for a single call lands in [TARGET_TIME_MS_MIN, TARGET_TIME_MS_MAX].
@@ -267,7 +270,7 @@ def _calibrate_benchmark_size(
     fn_upper = fn_name.upper()
     fn_lower = fn_name.lower()
     n = N_DEFAULT
-    n_max = VECTOR_N_MAX if _is_vector_blas(fn_name) else N_MAX
+    n_max = VECTOR_N_MAX if _is_vector_blas(fn_name) else min(N_MAX, matrix_n_max)
     max_steps = VECTOR_CALIBRATION_STEPS if _is_vector_blas(fn_name) else MAX_CALIBRATION_STEPS
     fortran_deps = _resolve_fortran_deps(source_dir, dep_files, call_graph, fn_upper)
 
@@ -276,7 +279,8 @@ def _calibrate_benchmark_size(
             status_fn(f"Calibrating benchmark size for {fn_name} (N={n})…")
         log.info(f"Calibrating {fn_name}: attempt {step + 1}/{max_steps}, N={n}")
 
-        generate_dataset(fn_name, n, output_dir, prec=prec)
+        calib_seed = 42 + (step // max(1, dataset_reuse_every))
+        generate_dataset(fn_name, n, output_dir, prec=prec, seed=calib_seed)
         driver_src = _make_fortran_driver_source(fn_name, n, sig, prec)
         driver_file = output_dir / f"bench_{fn_lower}_calib.f90"
         driver_file.write_text(driver_src)
@@ -294,7 +298,7 @@ def _calibrate_benchmark_size(
             result = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=120)
             if result.returncode != 0:
                 log.warning(f"  Calibration compile failed for {fn_name} at N={n}; using default N={N_DEFAULT}")
-                return N_DEFAULT
+                return N_DEFAULT, 1
 
             run_result = subprocess.run(
                 [str(exe_path.resolve())],
@@ -305,21 +309,30 @@ def _calibrate_benchmark_size(
             )
             if run_result.returncode != 0:
                 log.warning(f"  Calibration run failed for {fn_name} at N={n}; using default N={N_DEFAULT}")
-                return N_DEFAULT
+                return N_DEFAULT, 1
 
             match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", run_result.stdout)
             if not match:
                 log.warning(f"  Calibration could not parse timing for {fn_name} at N={n}; using current N")
-                return n
+                return n, 1
 
             elapsed_ms = float(match.group(1))
             log.info(f"  Calibration timing for {fn_name}: N={n}, t={elapsed_ms:.4f} ms")
 
             if TARGET_TIME_MS_MIN <= elapsed_ms <= TARGET_TIME_MS_MAX:
-                return n
+                return n, 1
             if elapsed_ms < TARGET_TIME_MS_MIN:
                 if n >= n_max:
-                    break
+                    est_runs = int((TARGET_TIME_MS_MIN + max(elapsed_ms, 1e-6) - 1e-9) / max(elapsed_ms, 1e-6))
+                    timing_runs = max(1, min(timing_max_runs, est_runs))
+                    log.info(
+                        "  Calibration %s: N=%s below %.1fms; using %s timing run(s)",
+                        fn_name,
+                        n,
+                        TARGET_TIME_MS_MIN,
+                        timing_runs,
+                    )
+                    return n, timing_runs
                 n = min(n_max, n * 2)
             else:
                 if n <= N_MIN:
@@ -327,13 +340,13 @@ def _calibrate_benchmark_size(
                 n = max(N_MIN, n // 2)
         except Exception as e:
             log.warning(f"  Calibration exception for {fn_name} at N={n}: {e}; using default N={N_DEFAULT}")
-            return N_DEFAULT
+            return N_DEFAULT, 1
 
     log.warning(
         f"  Calibration for {fn_name} ended at N={n} outside target "
         f"[{TARGET_TIME_MS_MIN:.1f}, {TARGET_TIME_MS_MAX:.1f}] ms"
     )
-    return n
+    return n, 1
 
 
 def generate_precision_dataset(fn_name: str, N: int, output_dir: Path,
@@ -365,9 +378,9 @@ def generate_precision_dataset(fn_name: str, N: int, output_dir: Path,
 
 
 def generate_dataset(fn_name: str, N: int, output_dir: Path,
-                     prec: _Precision = _PREC_D) -> dict[str, Path]:
+                     prec: _Precision = _PREC_D, seed: int = 42) -> dict[str, Path]:
     """Generate common input dataset files (typed binary) shared by Fortran/C/Rust."""
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
     fn_upper = fn_name.upper()
     dtype = np.dtype(prec.numpy_dtype)
 
@@ -1686,6 +1699,10 @@ def generate_benchmarks(
     dep_files: list[Path],
     output_dir: Path,
     call_graph: dict[str, list[str]] | None = None,
+    max_parallel: int = 2,
+    matrix_n_max: int = 768,
+    timing_max_runs: int = 12,
+    dataset_reuse_every: int = 3,
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1704,6 +1721,7 @@ def generate_benchmarks(
     ep_prec: dict[str, _Precision] = {}
     ep_sig:  dict[str, dict | None] = {}
     ep_n:    dict[str, int] = {}
+    ep_timing_runs: dict[str, int] = {}
     for ep in entry_points:
         ep_upper = ep.upper()
         if ep_upper in KNOWN_BLAS:
@@ -1731,13 +1749,13 @@ def generate_benchmarks(
             with _status_lock:
                 status_fn(msg)
 
-    max_workers = min(len(entry_points), os.cpu_count() or 4)
+    max_workers = min(len(entry_points), max(1, max_parallel))
     if status_fn:
         status_fn(f"Calibrating benchmark sizes for {len(entry_points)} function(s) "
                   f"(up to {max_workers} parallel workers)…")
 
-    def _calibrate_one(ep: str) -> tuple[str, int]:
-        n = _calibrate_benchmark_size(
+    def _calibrate_one(ep: str) -> tuple[str, int, int]:
+        n, timing_runs = _calibrate_benchmark_size(
             fn_name=ep,
             source_dir=source_dir,
             dep_files=dep_files,
@@ -1746,16 +1764,20 @@ def generate_benchmarks(
             sig=ep_sig[ep],
             prec=ep_prec[ep],
             log=log,
+            matrix_n_max=matrix_n_max,
+            timing_max_runs=timing_max_runs,
+            dataset_reuse_every=dataset_reuse_every,
             status_fn=_safe_status,
         )
-        log.info(f"  Selected benchmark size for {ep}: N={n}")
-        return ep, n
+        log.info(f"  Selected benchmark size for {ep}: N={n}, timing_runs={timing_runs}")
+        return ep, n, timing_runs
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_calibrate_one, ep): ep for ep in entry_points}
         for fut in as_completed(futures):
-            ep, n = fut.result()   # re-raises any exception from the worker
+            ep, n, timing_runs = fut.result()   # re-raises any exception from the worker
             ep_n[ep] = n
+            ep_timing_runs[ep] = timing_runs
 
     all_datasets: dict[str, dict] = {}
     for ep in entry_points:
@@ -1870,6 +1892,7 @@ def generate_benchmarks(
         bench_info: dict = {
             "driver_file": str(driver_file),
             "n": N,
+            "timing_runs": ep_timing_runs.get(ep, 1),
             "numpy_dtype": prec.numpy_dtype,
             "dataset": {k: str(v) for k, v in dataset_paths.items()},
             "compile_cmd": compile_cmd,
@@ -1908,31 +1931,51 @@ def generate_benchmarks(
                 if status_fn:
                     status_fn(f"Running Fortran baseline for {ep}…")
                 log.info(f"  Running Fortran baseline for {ep}")
-                run_result = subprocess.run(
-                    [str(exe_path)],
-                    capture_output=True, text=True,
-                    cwd=str(output_dir.resolve()), timeout=300,
-                )
-                bench_info["run_exit_code"] = run_result.returncode
-                bench_info["run_ok"] = run_result.returncode == 0
-                bench_info["run_stdout"] = run_result.stdout
-                bench_info["run_stderr"] = run_result.stderr
-                with open(compile_log, "a") as fh:
-                    fh.write(
-                        f"\n=== RUN STDOUT ===\n{run_result.stdout}\n"
-                        f"=== RUN STDERR ===\n{run_result.stderr}\n"
-                        f"=== RUN EXIT CODE: {run_result.returncode} ===\n"
+                run_times: list[float] = []
+                baseline_runs = max(1, ep_timing_runs.get(ep, 1))
+                run_result = None
+                for run_idx in range(baseline_runs):
+                    if run_idx == 0 or run_idx % max(1, dataset_reuse_every) == 0:
+                        seed = 42 + (run_idx // max(1, dataset_reuse_every))
+                        rotated = generate_dataset(ep, N, output_dir, prec=prec, seed=seed)
+                        all_datasets[ep] = {k: str(v) for k, v in rotated.items()}
+                        bench_info["dataset"] = {k: str(v) for k, v in rotated.items()}
+
+                    run_result = subprocess.run(
+                        [str(exe_path)],
+                        capture_output=True, text=True,
+                        cwd=str(output_dir.resolve()), timeout=300,
                     )
-                if run_result.returncode != 0:
-                    raise BenchmarkRuntimeError(
-                        ep,
-                        f"Fortran benchmark executable failed (exit {run_result.returncode}). "
-                        f"See {compile_log.name}",
+                    bench_info["run_exit_code"] = run_result.returncode
+                    bench_info["run_ok"] = run_result.returncode == 0
+                    bench_info["run_stdout"] = run_result.stdout
+                    bench_info["run_stderr"] = run_result.stderr
+                    with open(compile_log, "a") as fh:
+                        fh.write(
+                            f"\n=== RUN {run_idx + 1}/{baseline_runs} STDOUT ===\n{run_result.stdout}\n"
+                            f"=== RUN {run_idx + 1}/{baseline_runs} STDERR ===\n{run_result.stderr}\n"
+                            f"=== RUN {run_idx + 1}/{baseline_runs} EXIT CODE: {run_result.returncode} ===\n"
+                        )
+                    if run_result.returncode != 0:
+                        raise BenchmarkRuntimeError(
+                            ep,
+                            f"Fortran benchmark executable failed (exit {run_result.returncode}). "
+                            f"See {compile_log.name}",
+                        )
+
+                    match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", run_result.stdout)
+                    if match:
+                        run_times.append(float(match.group(1)))
+
+                if run_times:
+                    bench_info["time_ms"] = sum(run_times) / len(run_times)
+                    log.info(
+                        "  Fortran baseline time: %.4f ms (%d run(s), dataset reuse every %d)",
+                        bench_info["time_ms"],
+                        baseline_runs,
+                        max(1, dataset_reuse_every),
                     )
-                match = re.search(r"FORTRAN_TIME_MS=\s*([\d.]+)", run_result.stdout)
-                if match:
-                    bench_info["time_ms"] = float(match.group(1))
-                    log.info(f"  Fortran baseline time: {bench_info['time_ms']:.4f} ms")
+
                 bin_file = output_dir / f"bench_{ep_lower}_output.bin"
                 if bin_file.exists():
                     bench_info["output_file"] = str(bin_file)
