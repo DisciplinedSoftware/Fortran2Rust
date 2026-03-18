@@ -259,6 +259,7 @@ def _calibrate_benchmark_size(
     prec: _Precision,
     log,
     matrix_n_max: int,
+    vector_n_max: int,
     timing_max_runs: int,
     dataset_reuse_every: int,
     status_fn=None,
@@ -270,7 +271,7 @@ def _calibrate_benchmark_size(
     fn_upper = fn_name.upper()
     fn_lower = fn_name.lower()
     n = N_DEFAULT
-    n_max = VECTOR_N_MAX if _is_vector_blas(fn_name) else min(N_MAX, matrix_n_max)
+    n_max = min(VECTOR_N_MAX, vector_n_max) if _is_vector_blas(fn_name) else min(N_MAX, matrix_n_max)
     max_steps = VECTOR_CALIBRATION_STEPS if _is_vector_blas(fn_name) else MAX_CALIBRATION_STEPS
     fortran_deps = _resolve_fortran_deps(source_dir, dep_files, call_graph, fn_upper)
 
@@ -1702,8 +1703,9 @@ def generate_benchmarks(
     dep_files: list[Path],
     output_dir: Path,
     call_graph: dict[str, list[str]] | None = None,
-    max_parallel: int = 2,
-    matrix_n_max: int = 768,
+    max_parallel: int = 1,
+    matrix_n_max: int = 512,
+    vector_n_max: int = 262144,
     timing_max_runs: int = 12,
     dataset_reuse_every: int = 3,
     status_fn=None,
@@ -1768,6 +1770,7 @@ def generate_benchmarks(
             prec=ep_prec[ep],
             log=log,
             matrix_n_max=matrix_n_max,
+            vector_n_max=vector_n_max,
             timing_max_runs=timing_max_runs,
             dataset_reuse_every=dataset_reuse_every,
             status_fn=_safe_status,

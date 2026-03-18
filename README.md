@@ -17,7 +17,7 @@ The easiest way to get started is with the included dev container, which pre-ins
    - You can also set a generic `LLM_API_KEY` as a fallback for all providers.
    - For large files, increase `LLM_MAX_TOKENS` (for example `16384`) to reduce truncated LLM outputs.
    - Tune `LLM_MAX_PARALLEL` (default `2`) to cap concurrent LLM requests in stages 7/8 and avoid RAM spikes.
-   - Stage 2 memory/timing tuning: `S2_MAX_PARALLEL` (default `2`), `S2_MATRIX_N_MAX` (default `768`), `S2_TIMING_MAX_RUNS` (default `12`, set `0` for unlimited), and `S2_DATASET_REUSE_EVERY` (default `3`).
+   - Stage 2 memory/timing tuning: `S2_MAX_PARALLEL` (default `1`), `S2_MATRIX_N_MAX` (default `512`), `S2_VECTOR_N_MAX` (default `262144`), `S2_TIMING_MAX_RUNS` (default `12`, set `0` for unlimited), and `S2_DATASET_REUSE_EVERY` (default `3`).
 4. Run the pipeline:
    ```bash
    fortran2rust

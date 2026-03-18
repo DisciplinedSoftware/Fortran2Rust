@@ -278,6 +278,7 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                         call_graph=call_graph,
                         max_parallel=config.s2_max_parallel,
                         matrix_n_max=config.s2_matrix_n_max,
+                        vector_n_max=config.s2_vector_n_max,
                         timing_max_runs=config.s2_timing_max_runs,
                         dataset_reuse_every=config.s2_dataset_reuse_every,
                         status_fn=status_fn,
