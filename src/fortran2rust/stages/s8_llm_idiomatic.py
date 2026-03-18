@@ -109,6 +109,7 @@ def make_idiomatic(
     llm: "LLMClient",
     max_retries: int,
     baseline_dir: Path,
+    llm_max_parallel: int = 2,
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -143,8 +144,12 @@ def make_idiomatic(
     log.info(f"Processing {len(rs_files)} Rust files")
 
     if rs_files:
+        max_workers = max(1, min(llm_max_parallel, len(rs_files)))
         if status_fn:
-            status_fn(f"LLM: rewriting {len(rs_files)} file(s) to idiomatic Rust (parallel)…")
+            status_fn(
+                f"LLM: rewriting {len(rs_files)} file(s) to idiomatic Rust "
+                f"(parallel={max_workers})…"
+            )
 
         # ── Phase 1: parallel idiomatic rewrite ───────────────────────────────
         def _rewrite(rs_file: Path) -> tuple:
@@ -157,7 +162,7 @@ def make_idiomatic(
             )
             return rs_file, llm.complete(prompt, compact_code), preserved_prefix
 
-        with ThreadPoolExecutor(max_workers=len(rs_files)) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             rewrites = list(executor.map(_rewrite, rs_files))
 
         for rs_file, response, preserved_prefix in rewrites:
@@ -255,6 +260,7 @@ def make_idiomatic(
         "files_processed": len(rs_files),
         "llm_turns": llm_turns,
         "retries": retries,
+        "llm_parallel": max(1, llm_max_parallel),
     }
 
     # ── Benchmarks: build bins + run against Fortran baseline ─────────────────

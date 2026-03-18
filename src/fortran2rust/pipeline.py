@@ -322,7 +322,15 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                     s6_dir = run_dir / s6_dirs[0].name
                     s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
                     s2_dir = run_dir / s2_dirs[0].name
-                    results[7] = make_safe(s6_dir, stage_dir, llm, config.max_retries, s2_dir, status_fn=status_fn)
+                    results[7] = make_safe(
+                        s6_dir,
+                        stage_dir,
+                        llm,
+                        config.max_retries,
+                        s2_dir,
+                        llm_max_parallel=config.llm_max_parallel,
+                        status_fn=status_fn,
+                    )
 
                 elif stage_num == 8:
                     from .stages.s8_llm_idiomatic import make_idiomatic
@@ -330,7 +338,15 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                     s7_dir = run_dir / s7_dirs[0].name
                     s2_dirs = [d for d in run_dir.iterdir() if d.name.startswith("s2_")]
                     s2_dir = run_dir / s2_dirs[0].name
-                    results[8] = make_idiomatic(s7_dir, stage_dir, llm, config.max_retries, s2_dir, status_fn=status_fn)
+                    results[8] = make_idiomatic(
+                        s7_dir,
+                        stage_dir,
+                        llm,
+                        config.max_retries,
+                        s2_dir,
+                        llm_max_parallel=config.llm_max_parallel,
+                        status_fn=status_fn,
+                    )
                     # Keep final Rust crate easy to consume from the run root.
                     _export_final_rust_to_run_root(run_dir, stage_dir)
 

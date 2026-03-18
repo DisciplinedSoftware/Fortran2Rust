@@ -72,6 +72,7 @@ def make_safe(
     llm: "LLMClient",
     max_retries: int,
     baseline_dir: Path,
+    llm_max_parallel: int = 2,
     status_fn=None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -117,9 +118,11 @@ def make_safe(
         )
 
     if files_to_process:
+        max_workers = max(1, min(llm_max_parallel, len(files_to_process)))
         if status_fn:
             status_fn(
-                f"LLM: removing unsafe blocks from {len(files_to_process)} file(s) (parallel)…"
+                f"LLM: removing unsafe blocks from {len(files_to_process)} file(s) "
+                f"(parallel={max_workers})…"
             )
 
         # ── Phase 1: parallel initial unsafe removal ──────────────────────────
@@ -136,7 +139,7 @@ def make_safe(
             )
             return rs_file, n, llm.complete(prompt, compact_code), preserved_prefix
 
-        with ThreadPoolExecutor(max_workers=len(files_to_process)) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             rewrites = list(executor.map(_rewrite, files_to_process))
 
         for rs_file, n, response, preserved_prefix in rewrites:
@@ -238,6 +241,7 @@ def make_safe(
         "unsafe_after": unsafe_after,
         "llm_turns": llm_turns,
         "retries": retries,
+        "llm_parallel": max(1, llm_max_parallel),
     }
 
     # ── Benchmarks: build bins + run against Fortran baseline ─────────────────

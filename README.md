@@ -16,6 +16,7 @@ The easiest way to get started is with the included dev container, which pre-ins
    - For `github` provider, set `GITHUB_TOKEN` (reads from `gh auth` if available, or set explicitly).
    - You can also set a generic `LLM_API_KEY` as a fallback for all providers.
    - For large files, increase `LLM_MAX_TOKENS` (for example `16384`) to reduce truncated LLM outputs.
+   - Tune `LLM_MAX_PARALLEL` (default `2`) to cap concurrent LLM requests in stages 7/8 and avoid RAM spikes.
 4. Run the pipeline:
    ```bash
    fortran2rust
