@@ -27,7 +27,8 @@ MAX_CALIBRATION_STEPS = 6
 VECTOR_N_MAX = 2_048_000
 VECTOR_CALIBRATION_STEPS = 13
 MIN_EFFECTIVE_TIMING_MS = 1e-3
-TIMING_RUNS_UNLIMITED_GUARDRAIL = 1000
+TIMING_RUNS_UNLIMITED_GUARDRAIL = 50000
+TIMING_RUNS_TARGET_WINDOW_MS = 5.0
 DEFAULT_TIMING_DAMPING = 0.75
 
 
@@ -114,11 +115,19 @@ def _format_fortran_invocation(prefix: str, args: list[str], max_len: int = 100)
     return "\n".join(lines)
 
 
+def _indent_fortran_block(block: str, spaces: int) -> str:
+    pad = " " * spaces
+    return "\n".join(pad + line if line.strip() else line for line in block.splitlines())
+
+
 def _estimate_timing_runs(elapsed_ms: float, timing_max_runs: int, timing_damping: float) -> int:
     """Estimate repeat count for timing with quantization safeguards and sublinear damping."""
     effective_ms = max(elapsed_ms, MIN_EFFECTIVE_TIMING_MS)
-    est_runs = int((TARGET_TIME_MS_MIN + effective_ms - 1e-9) / effective_ms)
-    if est_runs > 1 and timing_damping < 1.0:
+    target_window_ms = max(TARGET_TIME_MS_MIN, TIMING_RUNS_TARGET_WINDOW_MS)
+    est_runs = int((target_window_ms + effective_ms - 1e-9) / effective_ms)
+
+    quantized_timer = elapsed_ms <= (MIN_EFFECTIVE_TIMING_MS + 1e-9)
+    if est_runs > 1 and timing_damping < 1.0 and not quantized_timer:
         est_runs = int(est_runs ** timing_damping)
     est_runs = max(1, est_runs)
     if timing_max_runs == 0:
@@ -285,9 +294,15 @@ def _resolve_fortran_deps(
     return [str(p) for p in sorted(set(fortran_dep_paths))]
 
 
-def _make_fortran_driver_source(fn_name: str, n: int, sig: dict | None, prec: _Precision) -> str:
+def _make_fortran_driver_source(
+    fn_name: str,
+    n: int,
+    sig: dict | None,
+    prec: _Precision,
+    timing_runs: int = 1,
+) -> str:
     """Return the standard Fortran benchmark driver source for *fn_name* at size *n*."""
-    return _make_generic_driver(fn_name, n, sig, prec)
+    return _make_generic_driver(fn_name, n, sig, prec, timing_runs=timing_runs)
 
 
 def _calibrate_benchmark_size(
@@ -326,7 +341,7 @@ def _calibrate_benchmark_size(
 
         calib_seed = 42 + (step // max(1, dataset_reuse_every))
         generate_dataset(fn_name, n, output_dir, prec=prec, seed=calib_seed, sig=sig, vector_mode=is_vector)
-        driver_src = _make_fortran_driver_source(fn_name, n, sig, prec)
+        driver_src = _make_fortran_driver_source(fn_name, n, sig, prec, timing_runs=1)
         driver_file = output_dir / f"bench_{fn_lower}_calib.f90"
         driver_file.write_text(driver_src)
         exe_path = output_dir / f"bench_{fn_lower}_calib"
@@ -368,12 +383,14 @@ def _calibrate_benchmark_size(
                 return n, 1
             if elapsed_ms < TARGET_TIME_MS_MIN:
                 if not is_size_sensitive:
+                    timing_runs = _estimate_timing_runs(elapsed_ms, timing_max_runs, timing_damping)
                     log.info(
-                        "  Calibration %s: scalar/non-size-sensitive function (%.4fms); using single timing run",
+                        "  Calibration %s: scalar/non-size-sensitive function (%.4fms); using %s timing run(s)",
                         fn_name,
                         elapsed_ms,
+                        timing_runs,
                     )
-                    return n, 1
+                    return n, timing_runs
                 # Vector kernels (e.g., DASUM/DNRM2) are often sub-ms even at large N.
                 # Prefer repeated timing runs over growing N to huge values, which can
                 # dramatically increase compile/runtime memory pressure.
@@ -496,8 +513,13 @@ def generate_dataset(
 
 
 
-def _make_generic_driver(fn_name: str, N: int,
-                         sig: dict | None, prec: _Precision) -> str:
+def _make_generic_driver(
+    fn_name: str,
+    N: int,
+    sig: dict | None,
+    prec: _Precision,
+    timing_runs: int = 1,
+) -> str:
     """
     Generate a Fortran benchmark driver from a parsed signature.
 
@@ -508,6 +530,8 @@ def _make_generic_driver(fn_name: str, N: int,
     fn_up = fn_name.upper()
     fn_lo = fn_name.lower()
     vector_mode = _is_vector_signature(sig)
+
+    bench_runs = max(1, int(timing_runs))
 
     if sig is None:
         # Fallback: typed placeholder with the dominant precision
@@ -524,8 +548,9 @@ def _make_generic_driver(fn_name: str, N: int,
       INTEGER, PARAMETER :: N = {N}
       {ftype} :: A(N,N), B(N,N), C(N,N)
       {ftype} :: ALPHA, BETA
-    DOUBLE PRECISION :: ELAPSED, T1, T2
-      INTEGER :: I, J
+        DOUBLE PRECISION :: ELAPSED, T1, T2
+            INTEGER :: I, J, BENCH_ITER, BENCH_RUNS, BENCH_RUNS_MAX
+            DOUBLE PRECISION :: BENCH_TARGET_MS
 
     OPEN(10, FILE='dataset_{fn_lo}_A.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')
       READ(10) A
@@ -542,11 +567,22 @@ def _make_generic_driver(fn_name: str, N: int,
         END DO
       END DO
 
-            CALL CPU_TIME(T1)
-            ! TODO: replace with the correct {fn_up}(...) call
-{call_stmt}
-            CALL CPU_TIME(T2)
-            ELAPSED = (T2-T1) * 1000.0D0
+            BENCH_RUNS = {bench_runs}
+            BENCH_RUNS_MAX = MAX(1000000, BENCH_RUNS * 1024)
+            BENCH_TARGET_MS = {TARGET_TIME_MS_MIN:.1f}D0
+
+                        DO
+                            CALL CPU_TIME(T1)
+                            DO BENCH_ITER = 1, BENCH_RUNS
+                                ! TODO: replace with the correct {fn_up}(...) call
+{_indent_fortran_block(call_stmt, 8)}
+                            END DO
+                            CALL CPU_TIME(T2)
+                            ELAPSED = (T2-T1) * 1000.0D0
+                            IF (ELAPSED .GE. BENCH_TARGET_MS) EXIT
+                            IF (BENCH_RUNS .GE. BENCH_RUNS_MAX) EXIT
+                            BENCH_RUNS = MIN(BENCH_RUNS_MAX, BENCH_RUNS * 2)
+                        END DO
 
     OPEN(13, FILE='bench_{fn_lo}_output.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='REPLACE')
       WRITE(13) C
@@ -564,6 +600,7 @@ def _make_generic_driver(fn_name: str, N: int,
     call_args:  list[str] = []
     file_n  = 10
     arr_idx = 0   # index into dataset_A / dataset_B files
+    array_vars: list[str] = []
 
     for p in params:
         pname  = p["name"]
@@ -596,8 +633,10 @@ def _make_generic_driver(fn_name: str, N: int,
             if p["is_array"]:
                 if vector_mode:
                     decls.append(f"      {ptype} :: {bvar}(N)")
+                    decls.append(f"      {ptype} :: {bvar}_ORIG(N)")
                 else:
                     decls.append(f"      {ptype} :: {bvar}(N,N)")
+                    decls.append(f"      {ptype} :: {bvar}_ORIG(N,N)")
                 ds = "A" if arr_idx == 0 else "B"
                 file_opens.append(
                     f"      OPEN({file_n}, FILE='dataset_{fn_lo}_{ds}.bin', FORM='UNFORMATTED', ACCESS='STREAM', STATUS='OLD')\n"
@@ -606,6 +645,7 @@ def _make_generic_driver(fn_name: str, N: int,
                 )
                 file_n  += 1
                 arr_idx += 1
+                array_vars.append(bvar)
                 call_args.append(bvar)
             else:
                 decls.append(f"      {ptype} :: {bvar}")
@@ -643,6 +683,9 @@ def _make_generic_driver(fn_name: str, N: int,
     decl_block      = "\n".join(decls)
     init_block      = "\n".join(inits)
     file_open_block = "\n".join(file_opens)
+    save_block = "\n".join([f"      {name}_ORIG = {name}" for name in array_vars])
+    restore_block = "\n".join([f"      {name} = {name}_ORIG" for name in array_vars])
+    timed_call_block = _indent_fortran_block(call_stmt, 6)
 
     output_block = ""
     if out_var:
@@ -657,15 +700,29 @@ def _make_generic_driver(fn_name: str, N: int,
       IMPLICIT NONE
       INTEGER, PARAMETER :: N = {N}
 {result_decl}{func_decl}{decl_block}
-            DOUBLE PRECISION :: ELAPSED, T1, T2
+        DOUBLE PRECISION :: ELAPSED, T1, T2, BENCH_TARGET_MS
+    INTEGER :: BENCH_ITER, BENCH_RUNS, BENCH_RUNS_MAX
 
 {file_open_block}
 {init_block}
+{save_block}
 
-            CALL CPU_TIME(T1)
-{call_stmt}
-            CALL CPU_TIME(T2)
-            ELAPSED = (T2-T1) * 1000.0D0
+    BENCH_RUNS = {bench_runs}
+    BENCH_RUNS_MAX = MAX(1000000, BENCH_RUNS * 1024)
+    BENCH_TARGET_MS = {TARGET_TIME_MS_MIN:.1f}D0
+
+        DO
+          CALL CPU_TIME(T1)
+          DO BENCH_ITER = 1, BENCH_RUNS
+{_indent_fortran_block(restore_block, 8)}
+{_indent_fortran_block(call_stmt, 8)}
+          END DO
+          CALL CPU_TIME(T2)
+          ELAPSED = (T2-T1) * 1000.0D0
+          IF (ELAPSED .GE. BENCH_TARGET_MS) EXIT
+          IF (BENCH_RUNS .GE. BENCH_RUNS_MAX) EXIT
+          BENCH_RUNS = MIN(BENCH_RUNS_MAX, BENCH_RUNS * 2)
+        END DO
 
 {output_block}
     WRITE(*,'(A,F16.8)') 'FORTRAN_TIME_MS=', ELAPSED
@@ -682,7 +739,7 @@ def _make_generic_precision_driver(fn_name: str, N: int,
     """
     fn_up = fn_name.upper()
     fn_lo = fn_name.lower()
-    src = _make_generic_driver(fn_name, N, sig, prec)
+    src = _make_generic_driver(fn_name, N, sig, prec, timing_runs=1)
     src = src.replace(f"PROGRAM BENCH_{fn_up}", f"PROGRAM BENCH_{fn_up}_PREC", 1)
     src = src.replace(f"dataset_{fn_lo}_A.bin", f"dataset_{fn_lo}_precision_A.bin")
     src = src.replace(f"dataset_{fn_lo}_B.bin", f"dataset_{fn_lo}_precision_B.bin")
@@ -1141,7 +1198,7 @@ def generate_benchmarks(
         driver_ext = ".f90"
         precision_ext = ".f90"
 
-        driver_src      = _make_generic_driver(ep, N, sig, prec)
+        driver_src      = _make_generic_driver(ep, N, sig, prec, timing_runs=ep_timing_runs[ep])
         precision_src   = _make_generic_precision_driver(ep, N, sig, prec)
         c_driver_src    = _make_c_generic_driver(ep, N, sig, prec)
         c_precision_src = _make_c_generic_driver(ep, N, sig, prec).replace(
@@ -1229,7 +1286,7 @@ def generate_benchmarks(
                     status_fn(f"Running Fortran baseline for {ep}…")
                 log.info(f"  Running Fortran baseline for {ep}")
                 run_times: list[float] = []
-                baseline_runs = max(1, ep_timing_runs.get(ep, 1))
+                baseline_runs = 1
                 run_result = None
                 for run_idx in range(baseline_runs):
                     if run_idx == 0 or run_idx % max(1, dataset_reuse_every) == 0:
@@ -1275,10 +1332,9 @@ def generate_benchmarks(
                 if run_times:
                     bench_info["time_ms"] = sum(run_times) / len(run_times)
                     log.info(
-                        "  Fortran baseline time: %.4f ms (%d run(s), dataset reuse every %d)",
+                        "  Fortran baseline time: %.4f ms (driver timing_runs=%d)",
                         bench_info["time_ms"],
-                        baseline_runs,
-                        max(1, dataset_reuse_every),
+                        max(1, ep_timing_runs.get(ep, 1)),
                     )
 
                 bin_file = output_dir / f"bench_{ep_lower}_output.bin"
