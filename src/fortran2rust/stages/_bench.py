@@ -198,6 +198,39 @@ def _fix_bench_extern_types(bench_rs: Path) -> None:
     bench_rs.write_text(text)
 
 
+def _ensure_bench_modules_in_lib(lib_rs: Path, bench_rs_files: list[Path], log: logging.Logger) -> None:
+    """Ensure `pub mod bench_*;` entries exist in lib.rs for wrapper-bin builds."""
+    if not lib_rs.exists():
+        return
+
+    lib_text = lib_rs.read_text()
+    missing_lines = []
+    for bench_rs in bench_rs_files:
+        mod_line = f"pub mod {bench_rs.stem};"
+        if mod_line not in lib_text:
+            missing_lines.append(mod_line)
+
+    if not missing_lines:
+        return
+
+    suffix = "" if lib_text.endswith("\n") else "\n"
+    lib_rs.write_text(lib_text + suffix + "\n".join(missing_lines) + "\n")
+    log.info("Added bench module declarations to lib.rs: %s", ", ".join(missing_lines))
+
+
+def _write_bench_wrapper(output_dir: Path, stem: str) -> Path:
+    """Create a thin wrapper binary that calls crate bench module main()."""
+    bins_dir = output_dir / "src" / "__bench_bins"
+    bins_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = bins_dir / f"{stem}_main.rs"
+    wrapper.write_text(
+        f"fn main() {{\n"
+        f"    {_CRATE_NAME}::{stem}::main();\n"
+        f"}}\n"
+    )
+    return wrapper
+
+
 def run_rust_benchmarks(
     output_dir: Path,
     baseline_dir: Path,
@@ -210,12 +243,11 @@ def run_rust_benchmarks(
     against the Fortran baseline. Purely informational — never raises.
 
     For each src/bench_{fn}.rs in output_dir:
-      - Removes the ``pub mod bench_{fn};`` declaration from lib.rs so the
-        file can be compiled as a standalone binary (not a library module).
-        This is necessary for the ``#![feature(...)]`` attributes inside the
-        file to apply at the crate level.
       - Patches extern-type declarations to stable-Rust ``#[repr(C)]`` structs.
-      - Adds a ``[[bin]]`` entry to Cargo.toml pointing directly at the file.
+            - Ensures ``pub mod bench_{fn};`` exists in lib.rs.
+            - Generates a thin wrapper binary crate that calls
+                ``fortran2rust_output::bench_{fn}::main()``.
+            - Adds a ``[[bin]]`` entry to Cargo.toml pointing to that wrapper file.
       - Builds with ``cargo build --release --bins``
       - Copies dataset_*.bin files from baseline_dir into output_dir
       - Runs the binary from output_dir, parses C_TIME_MS / RUST_TIME_MS
@@ -241,20 +273,14 @@ def run_rust_benchmarks(
     if not bench_rs_files:
         return {}
 
-    # Remove bench_* module declarations from lib.rs so the files can be used
-    # directly as binary crate roots (c2rust already emits `pub fn main()`).
+    # Ensure bench modules are available from the library crate. Wrapper bins
+    # call into these modules, which keeps extern symbol resolution inside
+    # the same crate during linking.
     lib_rs = src_dir / "lib.rs"
-    if lib_rs.exists():
-        lib_text = lib_rs.read_text()
-        cleaned = re.sub(
-            r"^[^\S\n]*pub mod bench_[^\n]*\n", "", lib_text, flags=re.MULTILINE
-        )
-        if cleaned != lib_text:
-            lib_rs.write_text(cleaned)
-            log.info("Removed pub mod bench_* declarations from lib.rs")
+    _ensure_bench_modules_in_lib(lib_rs, bench_rs_files, log)
 
-    # Add [[bin]] entries that point directly at each bench_*.rs file.
-    # No thin-wrapper is needed — c2rust generates `pub fn main()` for them.
+    # Add [[bin]] entries that point at thin wrappers that call the bench
+    # modules through the library crate.
     cargo_content = cargo_toml.read_text()
     # Ensure rlib is in crate-type so [[bin]] targets can link against the lib.
     # Without rlib, extern "C" calls to #[no_mangle] functions are unresolved.
@@ -267,13 +293,14 @@ def run_rust_benchmarks(
         log.info("Added rlib to crate-type so bench binaries can link against the lib")
     for bench_rs in bench_rs_files:
         stem = bench_rs.stem  # e.g. bench_dgemm
+        wrapper = _write_bench_wrapper(output_dir, stem)
         if f'name = "{stem}"' in cargo_content:
             continue
         _fix_bench_extern_types(bench_rs)
-        log.info(f"Adding [[bin]] for {stem} (direct, no wrapper)")
+        log.info(f"Adding [[bin]] for {stem} via wrapper {wrapper.relative_to(output_dir)}")
         cargo_content += (
             f'\n[[bin]]\nname = "{stem}"\n'
-            f'path = "src/{stem}.rs"\n'
+            f'path = "{wrapper.relative_to(output_dir).as_posix()}"\n'
         )
     cargo_toml.write_text(cargo_content)
 
@@ -348,7 +375,29 @@ def run_rust_benchmarks(
                 dtype = np.dtype(baseline_dtypes.get(fn_name.lower(), "float64"))
                 r_data = np.fromfile(str(rust_out), dtype=dtype)
                 f_data = np.fromfile(str(fortran_bin), dtype=dtype)
-                if r_data.shape == f_data.shape:
+                # Guard: a Fortran baseline that is entirely zero means Stage 2
+                # did not actually execute the function.  Treat this as a failure
+                # so an all-zero Rust output cannot sneak through as a false pass.
+                if f_data.size == 0 or not np.any(f_data != 0):
+                    entry["run_error"] = (
+                        "Fortran baseline output is all-zeros — "
+                        "Stage 2 benchmark driver likely did not call the function"
+                    )
+                    log.warning(f"  {fn_name}: Fortran baseline is all-zeros, skipping comparison")
+                # Guard: a Rust output that is entirely zero means the Rust
+                # function was never called (or returned without writing output).
+                elif r_data.size == 0 or not np.any(r_data != 0):
+                    entry["run_error"] = (
+                        "Rust benchmark output is all-zeros — "
+                        "the function was likely not called or returned immediately"
+                    )
+                    log.warning(f"  {fn_name}: Rust output is all-zeros, treating as failure")
+                elif r_data.shape != f_data.shape:
+                    entry["run_error"] = (
+                        f"Shape mismatch: Rust output {r_data.shape} vs Fortran baseline {f_data.shape}"
+                    )
+                    log.warning(f"  {fn_name}: shape mismatch {r_data.shape} vs {f_data.shape}")
+                else:
                     abs_diff = np.abs(r_data - f_data)
                     entry["max_abs_diff"] = float(np.max(abs_diff))
                     entry["max_rel_diff"] = float(
@@ -362,11 +411,6 @@ def run_rust_benchmarks(
                         f"  {fn_name}: max_abs_diff={entry['max_abs_diff']:.3e}"
                         f", time_ms={entry['time_ms']}"
                     )
-                else:
-                    entry["run_error"] = (
-                        f"Shape mismatch: Rust output {r_data.shape} vs Fortran baseline {f_data.shape}"
-                    )
-                    log.warning(f"  {fn_name}: shape mismatch {r_data.shape} vs {f_data.shape}")
             else:
                 entry["run_error"] = "Rust benchmark output binary was not produced"
                 log.warning(f"  {fn_name}: output binary not found after run")

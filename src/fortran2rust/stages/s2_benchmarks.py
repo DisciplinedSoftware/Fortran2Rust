@@ -649,11 +649,10 @@ def _make_generic_driver(
                 call_args.append(bvar)
             else:
                 decls.append(f"      {ptype} :: {bvar}")
-                pu = pname.upper()
-                if pu in ("ALPHA", "SCALE", "DA", "SA", "ZA", "CA", "A", "W"):
-                    inits.append(f"      {bvar} = {p_prec.fortran_one}")
-                else:
-                    inits.append(f"      {bvar} = {p_prec.fortran_zero}")
+                # Always initialise scalar numeric params to a non-zero value so
+                # functions that write one of their scalars back produce non-zero
+                # output (e.g. THRESH-style test helpers).
+                inits.append(f"      {bvar} = {p_prec.fortran_one}")
                 call_args.append(bvar)
         else:
             # Unknown / unsupported type — declare as a comment placeholder
@@ -1183,6 +1182,7 @@ def generate_benchmarks(
 
     # ── Phase 2: benchmark drivers (Fortran + C + Rust) ──────────────────────
     benchmarks: dict[str, dict] = {}
+    discarded_entry_points: list[str] = []
     bench_files:    list[str] = []   # Fortran .f drivers (gfortran, modern syntax)
     bench_c_files:  list[str] = []   # C drivers (written directly, no f2c needed)
     bench_rs_files: list[str] = []   # Rust drivers (clean, no f2c contamination)
@@ -1339,6 +1339,30 @@ def generate_benchmarks(
 
                 bin_file = output_dir / f"bench_{ep_lower}_output.bin"
                 if bin_file.exists():
+                    # Guard: reject or discard trivially-zero baselines.
+                    # For unknown/array signatures → raise (something is wrong).
+                    # For parsed, scalar-only signatures → discard the entry point
+                    # and continue; it is a test-helper with no numeric output.
+                    _baseline_arr = np.fromfile(str(bin_file), dtype=np.float64)
+                    _is_zero_output = (
+                        _baseline_arr.size == 0 or not np.any(_baseline_arr != 0)
+                    )
+                    if _is_zero_output:
+                        if sig is None or _has_numeric_array_params(sig):
+                            raise BenchmarkRuntimeError(
+                                ep,
+                                f"Fortran baseline output {bin_file.name} is all-zeros — "
+                                "the benchmark driver likely did not call the function. "
+                                "Check the driver source and dataset files.",
+                            )
+                        else:
+                            log.warning(
+                                "  %s: scalar baseline is still all-zeros after non-zero inputs — "
+                                "discarding entry point (test-helper with no numeric output)",
+                                ep,
+                            )
+                            discarded_entry_points.append(ep)
+                            continue
                     bench_info["output_file"] = str(bin_file)
                     bench_info["output_ok"] = True
                     expected_file = output_dir / f"dataset_{ep_lower}_expected.bin"
@@ -1430,6 +1454,7 @@ def generate_benchmarks(
 
     result_data = {
         "benchmarks": benchmarks,
+        "discarded_entry_points": discarded_entry_points,
         "bench_files": bench_files,
         "bench_c_files": bench_c_files,
         "bench_rs_files": bench_rs_files,

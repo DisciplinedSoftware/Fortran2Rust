@@ -1199,19 +1199,39 @@ def fix_c_code(
                             f_data = np.fromfile(str(fortran_bin), dtype=fn_dtype)
                             if status_fn:
                                 status_fn(f"Comparing {fn_name} output vs Fortran baseline…")
-                            if c_data.shape == f_data.shape and np.allclose(c_data, f_data, atol=fn_atol, rtol=fn_atol):
-                                bench_results[fn_name] = {"pass": True, "max_abs_diff": 0.0, "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
+                            # Guard: a baseline that is entirely zero means Stage 2
+                            # did not actually call the function — treat as failure so
+                            # an all-zero C output cannot sneak through as a false pass.
+                            if f_data.size == 0 or not np.any(f_data != 0):
+                                err = (
+                                    f"Fortran baseline for {fn_name} is all-zeros — "
+                                    "Stage 2 benchmark driver likely did not call the function"
+                                )
+                                log.warning(f"  {fn_name}: Fortran baseline is all-zeros, cannot validate C output")
+                                bench_results[fn_name] = {"pass": False, "max_abs_diff": None, "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
+                            # Guard: a C output that is entirely zero with a non-zero
+                            # Fortran baseline means the C function was not called.
+                            elif c_data.size == 0 or not np.any(c_data != 0):
+                                err = (
+                                    f"C benchmark output for {fn_name} is all-zeros — "
+                                    "the function was likely not called or returned immediately"
+                                )
+                                log.warning(f"  {fn_name}: C output is all-zeros, treating as failure")
+                                bench_results[fn_name] = {"pass": False, "max_abs_diff": None, "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
+                            elif c_data.shape == f_data.shape and np.allclose(c_data, f_data, atol=fn_atol, rtol=fn_atol):
+                                bench_results[fn_name] = {"pass": True, "max_abs_diff": float(np.max(np.abs(c_data - f_data))), "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
                                 log.info(f"  {fn_name}: numerical check PASSED, c_time_ms={c_time_ms}")
                                 bench_succeeded = True
                                 break
-                            max_abs = float(np.max(np.abs(c_data - f_data))) if c_data.shape == f_data.shape else float("inf")
-                            bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs, "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
-                            _console.print(
-                                f"  [yellow]⚠ Numerical precision failed[/yellow] for [bold]{fn_name}[/bold]: "
-                                f"max diff = [bold]{max_abs:.3e}[/bold]"
-                            )
-                            log.warning(f"  {fn_name}: numerical check FAILED, max_abs_diff={max_abs:.3e}")
-                            err = f"Numerical mismatch: max_abs_diff={max_abs:.6e}"
+                            else:
+                                max_abs = float(np.max(np.abs(c_data - f_data))) if c_data.shape == f_data.shape else float("inf")
+                                bench_results[fn_name] = {"pass": False, "max_abs_diff": max_abs, "c_time_ms": c_time_ms, "numpy_dtype": fn_dtype}
+                                _console.print(
+                                    f"  [yellow]⚠ Numerical precision failed[/yellow] for [bold]{fn_name}[/bold]: "
+                                    f"max diff = [bold]{max_abs:.3e}[/bold]"
+                                )
+                                log.warning(f"  {fn_name}: numerical check FAILED, max_abs_diff={max_abs:.3e}")
+                                err = f"Numerical mismatch: max_abs_diff={max_abs:.6e}"
                         else:
                             if not ok:
                                 if _is_non_repairable_bench_error(err):

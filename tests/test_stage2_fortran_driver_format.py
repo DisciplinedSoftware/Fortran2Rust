@@ -25,7 +25,8 @@ def test_stage2_generates_free_form_fortran_drivers(monkeypatch, tmp_path: Path)
         run_dir = Path(cwd) if cwd else output_dir
 
         if exe_name == "bench_dgemm":
-            (run_dir / "bench_dgemm_output.bin").write_bytes(b"\0" * 8)
+            # float64(1.0) in little-endian — must be non-zero so the baseline validator passes
+            (run_dir / "bench_dgemm_output.bin").write_bytes(b'\x00\x00\x00\x00\x00\x00\xf0\x3f')
             return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.234\n", stderr="")
 
         if exe_name == "bench_dgemm_precision":
@@ -92,7 +93,7 @@ def test_stage2_generates_precision_for_generic_entrypoint(monkeypatch, tmp_path
         run_dir = Path(cwd) if cwd else output_dir
 
         if exe_name == "bench_dasum":
-            (run_dir / "bench_dasum_output.bin").write_bytes(b"\0" * 8)
+            (run_dir / "bench_dasum_output.bin").write_bytes(b'\x00\x00\x00\x00\x00\x00\xf0\x3f')
             return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.234\n", stderr="")
 
         if exe_name == "bench_dasum_precision":
@@ -147,7 +148,7 @@ def test_stage2_c_driver_is_generic_without_specialized_kernel_paths(monkeypatch
         run_dir = Path(cwd) if cwd else output_dir
 
         if exe_name == "bench_daxpy":
-            (run_dir / "bench_daxpy_output.bin").write_bytes(b"\0" * 8)
+            (run_dir / "bench_daxpy_output.bin").write_bytes(b'\x00\x00\x00\x00\x00\x00\xf0\x3f')
             return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.234\n", stderr="")
 
         if exe_name == "bench_daxpy_precision":
@@ -201,7 +202,7 @@ def test_stage2_dbeg_c_driver_declares_logical_param(monkeypatch, tmp_path: Path
         run_dir = Path(cwd) if cwd else output_dir
 
         if exe_name == "bench_dbeg":
-            (run_dir / "bench_dbeg_output.bin").write_bytes(b"\0" * 8)
+            (run_dir / "bench_dbeg_output.bin").write_bytes(b'\x00\x00\x00\x00\x00\x00\xf0\x3f')
             return SimpleNamespace(returncode=0, stdout="FORTRAN_TIME_MS=1.234\n", stderr="")
 
         if exe_name == "bench_dbeg_precision":

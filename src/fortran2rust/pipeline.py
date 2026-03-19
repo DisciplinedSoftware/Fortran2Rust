@@ -284,6 +284,16 @@ def run_pipeline(config: Config, library_path: Path, entry_points: list[str]) ->
                         dataset_reuse_every=config.s2_dataset_reuse_every,
                         status_fn=status_fn,
                     )
+                    _discarded = results[2].get("discarded_entry_points", [])
+                    if _discarded:
+                        console.print(
+                            f"  [yellow]⚠ Discarding {len(_discarded)} entry point(s) "
+                            f"with all-zero output even after non-zero inputs — "
+                            f"likely test helpers with no numeric output: "
+                            f"{', '.join(_discarded)}[/yellow]"
+                        )
+                        entry_points = [ep for ep in entry_points
+                                        if ep.upper() not in {d.upper() for d in _discarded}]
 
                 elif stage_num == 3:
                     from .stages.s3_f2c import run_f2c
